@@ -163,8 +163,8 @@ function render(id, job){
     `<span class="spk rnbtn" data-spk="${s}" title="Click to rename" style="background:${spkColor(s)}22;color:${spkColor(s)};border:1px solid ${spkColor(s)}55">${escapeHtml(spkName(s))}${isPartial ? "" : ` <b class="rn">✎</b>`}</span>`).join("");
   if (!isPartial) document.querySelectorAll("#legend .spk").forEach(el => el.onclick = () => renameBadge(el, el.dataset.spk));
   const audio = $("audio");
-  if (job.has_media && !audio.src) audio.src = `/media/${id}`;
-  audio.classList.toggle("hidden", !(job.has_media && audio.src));
+  if (job.has_media && audio.dataset.job !== id) { audio.dataset.job = id; audio.pause(); audio.src = `/media/${id}`; }
+  audio.classList.toggle("hidden", !(job.has_media && audio.src && audio.dataset.job === id));
   const box = $("segs");
   const lastS = job.segments[job.segments.length - 1];
   const sig = job.segments.length + "|" + (lastS ? lastS.speaker + ":" + lastS.start + ":" + lastS.end : "");
