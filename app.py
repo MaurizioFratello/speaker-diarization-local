@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import threading
@@ -17,6 +18,7 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -31,8 +33,31 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 RESULTS_DIR = DATA_DIR / "results"
 for d in (UPLOAD_DIR, RESULTS_DIR):
     d.mkdir(parents=True, exist_ok=True)
+# uploads/ is single-use scratch: files live only for conversion + transient
+# playback; every boot wipes it, finished jobs keep only the 16k preview wav.
+for _p in UPLOAD_DIR.iterdir():
+    if _p.is_file():
+        _p.unlink(missing_ok=True)
 
-app = FastAPI(title="Speaker Transcription")
+_shutdown = threading.Event()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Wipe upload scratch on exit so no large media files survive the app."""
+    yield
+    _shutdown.set()
+    gpu_executor.shutdown(wait=False, cancel_futures=True)
+    _sweep_uploads(None, force=True)
+    threads = list(getattr(gpu_executor, "_threads", ()))
+    deadline = time.time() + 15
+    while time.time() < deadline and any(th.is_alive() for th in threads):
+        time.sleep(0.5)
+    if any(th.is_alive() for th in threads):
+        os._exit(0)  # a stuck GPU worker must not hold the app open
+
+
+app = FastAPI(title="Speaker Transcription", lifespan=_lifespan)
 
 transcriber: Transcriber | None = None
 transcriber_error: str | None = None
@@ -119,6 +144,9 @@ def _save_result(job: dict) -> None:
         json.dumps({"name": job.get("name"), "segments": job["segments"], "labels": job.get("labels") or {}}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
+    # Human-readable markdown copy saved alongside the machine-readable result;
+    # rewritten on rename so the on-disk transcript always shows current names.
+    _result_path(job["id"]).with_suffix(".md").write_text(render_exports(job)["md"], encoding="utf-8")
 
 
 def _lookup_job(job_id: str) -> dict | None:
@@ -142,7 +170,7 @@ def _lookup_job(job_id: str) -> dict | None:
     name = data.get("name") if isinstance(data, dict) else None
     if not name:
         src = [q for q in UPLOAD_DIR.glob(f"{job_id}.*") if not q.name.endswith(".16k.wav")]
-        name = src[0].name[len(job_id) + 1:] if src else f"{job_id}.audio"
+        name = src[0].name[len(job_id) + 1:] if src else (f"{job_id}.wav" if (UPLOAD_DIR / f"{job_id}.16k.wav").is_file() else f"{job_id}.audio")
     job = {
         "id": job_id, "name": name, "status": "done", "stage": None, "error": None,
         "elapsed": None, "segments": segs, "labels": labels,
@@ -153,6 +181,27 @@ def _lookup_job(job_id: str) -> dict | None:
     return job
 
 
+def _sweep_uploads(keep: Path | None, force: bool = False) -> None:
+    """Delete upload/transcode scratch except files of queued/running jobs and `keep`.
+
+    With force=True (shutdown), live jobs' files go too."""
+    live = set()
+    if not force:
+        with jobs_lock:
+            for j in jobs.values():
+                if j["status"] in ("queued", "running"):
+                    live.add(str(j["id"]))
+    for p in UPLOAD_DIR.iterdir():
+        if p == keep or p.name.split(".")[0] in live:
+            continue
+        p.unlink(missing_ok=True)
+
+
+def _check_shutdown() -> None:
+    if _shutdown.is_set():
+        raise RuntimeError("Server is shutting down")
+
+
 def run_job(job_id: str, src_path: Path, device: str | None) -> None:
     job = jobs[job_id]
     try:
@@ -160,13 +209,17 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
         wav = src_path.with_name(src_path.stem + ".16k.wav")
         job["stage"] = "converting"
         prepare_audio(src_path, wav)
+        # the uploaded file is single-use: consumed by the conversion
+        src_path.unlink(missing_ok=True)
+        _check_shutdown()
         job["stage"] = "loading-models"
         tr = get_transcriber(device)
+        _check_shutdown()
         job["stage"] = "transcribing"
         segs = tr.transcribe(wav)
+        _check_shutdown()
         # drop empty texts
         segs = [s for s in segs if s["text"]]
-        wav.unlink(missing_ok=True)
         job["labels"] = {}
         job.update(
             status="done",
@@ -177,8 +230,11 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
             stage=None,
         )
         _save_result(job)
+        _sweep_uploads(wav)
     except Exception as exc:
         traceback.print_exc()
+        wav.unlink(missing_ok=True)
+        src_path.unlink(missing_ok=True)
         job.update(status="error", error=f"{type(exc).__name__}: {exc}", stage=None)
 
 
@@ -223,12 +279,18 @@ async def api_job(job_id: str):
     keep = {k: job.get(k) for k in ("id", "name", "status", "stage", "error", "elapsed", "duration", "speakers", "labels")}
     if job["status"] == "done":
         keep["segments"] = job["segments"]
+        keep["has_media"] = (UPLOAD_DIR / f"{job_id}.16k.wav").is_file() or any(
+            UPLOAD_DIR.glob(f"{job_id}.*")
+        )
     return keep
 
 @app.get("/media/{job_id}")
 async def api_media(job_id: str):
     if not re.fullmatch(r"[0-9a-f]{12}", job_id):
         raise HTTPException(400, "Bad id.")
+    wav = UPLOAD_DIR / f"{job_id}.16k.wav"
+    if wav.is_file():
+        return FileResponse(wav)
     hits = [p for p in UPLOAD_DIR.glob(f"{job_id}.*") if not p.name.endswith(".16k.wav")]
     if not hits:
         raise HTTPException(404, "No media.")

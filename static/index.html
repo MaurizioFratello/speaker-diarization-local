@@ -141,7 +141,8 @@ function render(id, job){
     `<span class="spk rnbtn" data-spk="${s}" title="Click to rename" style="background:${spkColor(s)}22;color:${spkColor(s)};border:1px solid ${spkColor(s)}55">${escapeHtml(spkName(s))} <b class="rn">✎</b></span>`).join("");
   document.querySelectorAll("#legend .spk").forEach(el => el.onclick = () => renameBadge(el, el.dataset.spk));
   const audio = $("audio");
-  audio.src = `/media/${id}`; audio.classList.remove("hidden");
+  if (job.has_media) { audio.src = `/media/${id}`; audio.classList.remove("hidden"); }
+  else { audio.removeAttribute("src"); audio.classList.add("hidden"); }
 
   $("segs").innerHTML = job.segments.map(s => `
     <div class="seg">

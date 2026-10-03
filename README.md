@@ -51,6 +51,19 @@ Then open **http://127.0.0.1:8765** and drop files.
 Supported inputs: WAV, MP3, M4A, FLAC, OGG/Opus, AAC, WMA, AMR, AIFF, and
 video containers (MP4, MKV, MOV, WEBM) — the audio track is extracted locally.
 
+Finished jobs get an in-browser player. It streams the internal 16 kHz
+transcode (never the uploaded container), so playback works for every input
+format regardless of browser codec support. Click a speaker badge (✎) in the
+legend to rename a speaker: names flow into the timeline, segment list, copy
+button and every download (txt/md/srt/vtt; JSON adds `speaker_name`).
+Clearing a name restores "Speaker N".
+
+Uploads are single-use: the uploaded file is deleted as soon as the audio
+conversion has consumed it, and only the small player transcode remains while
+the job's result is on screen; the upload directory is wiped on every server
+start. Transcripts (`data/results/*.json`) persist, so exports and renames
+still work after restarts.
+
 ## Options
 
 ```
@@ -79,7 +92,7 @@ Prints `[{"text", "start", "end", "speaker"}, ...]` segments.
 | `app.py` | FastAPI server: upload, jobs, exports, media playback |
 | `pipeline.py` | NeMo diarization+ASR pipeline + ffmpeg pre-converter |
 | `static/index.html` | Single-page drag & drop UI (no external assets) |
-| `data/` | Temporary uploads and per-job JSON results |
+| `data/` | `uploads/` single-use scratch (wiped on boot); `results/` per-job transcripts (persist) |
 | `setup.sh` / `run.sh` / `setup.ps1` / `run.bat` | Linux/Windows launchers |
 
 ## Troubleshooting
