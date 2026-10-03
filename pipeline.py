@@ -17,6 +17,8 @@ Output: list of {"text", "start", "end", "speaker"} dicts, sorted by time.
 from __future__ import annotations
 
 import os
+import threading
+from math import ceil as _ceil, floor as _floor
 
 # Reduce allocator fragmentation when sharing a GPU with other processes.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -141,7 +143,157 @@ def _is_silent_wav(path: str, threshold: float = 3e-4) -> bool:
     import soundfile as sf
 
     data, _sr = sf.read(path, dtype="float32", always_2d=True)
+    if data.size == 0:  # empty input: treat as silent rather than crashing
+        nemo_logging.warning(f"{path} contains no audio frames")
+        return True
     return float(np.max(np.abs(data))) < threshold
+
+
+_vad_model = None
+_vad_model_lock = threading.Lock()
+
+
+def _get_vad_model():
+    """Lazy Silero VAD singleton (CPU; model ships inside the silero-vad wheel)."""
+    global _vad_model
+    with _vad_model_lock:
+        if _vad_model is None:
+            from silero_vad import load_silero_vad
+
+            _vad_model = load_silero_vad(onnx=False)
+        return _vad_model
+
+
+def _vad_regions(data, sr, threshold: float = 0.5):
+    """Silero speech regions as [(start_s, end_s)]; [] when VAD is unavailable."""
+    try:
+        from silero_vad import get_speech_timestamps
+
+        return [(t["start"], t["end"]) for t in get_speech_timestamps(
+            torch.from_numpy(data), _get_vad_model(), sampling_rate=sr,
+            threshold=threshold, return_seconds=True
+        )]
+    except Exception as exc:
+        nemo_logging.warning(f"Silero VAD unavailable ({type(exc).__name__}: {exc})")
+        return []
+
+
+def splice_speech_regions(
+    wav_path: str | os.PathLike,
+    gap_merge: float = 1.0,
+    pad: float = 0.3,
+    quantum: float = 0.8,
+) -> tuple[str, list[tuple[float, float, float]] | None]:
+    """Remove INTERIOR silence: concatenate VAD-positive regions into one file.
+
+    Much faster on sparse recordings, but every splice re-anchors the streaming
+    encoders, so wording/speaker handoffs right at a cut can drift (measured
+    ~5% word delta on a 20-min recording; use as opt-in fast mode).
+    Returns ``(model_path, mapping)`` with mapping triples
+    ``(spliced_pos, length, original_pos)`` for :func:`map_spliced_time`;
+    ``(original path, None)`` when nothing is worth removing or on any failure
+    (never fatal).
+    """
+    wav_path = os.fspath(wav_path)
+    try:
+        import soundfile as sf
+
+        data, sr = sf.read(wav_path, dtype="float32")
+        duration = len(data) / sr
+        ts = _vad_regions(data, sr)
+        if not ts:
+            return wav_path, None
+        regions: list[list[float]] = []
+        for s, e in ts:
+            s, e = max(0.0, s - pad), min(duration, e + pad)
+            if regions and s - regions[-1][1] <= gap_merge:
+                regions[-1][1] = max(regions[-1][1], e)
+            else:
+                regions.append([s, e])
+        q = max(0.01, float(quantum))
+        cuts: list[tuple[float, float]] = []
+        prev_end = 0.0
+        for s, e in regions:
+            cs = min(max(_floor(s / q) * q, 0.0), duration)
+            ce = min(_ceil(e / q) * q, duration)
+            cs = max(cs, prev_end)  # snap can widen cuts into neighbours: never overlap
+            if ce <= cs:
+                continue
+            cuts.append((cs, ce))
+            prev_end = ce
+        if not cuts:
+            return wav_path, None
+        kept = sum(e - s for s, e in cuts)
+        if kept <= 0 or duration - kept < 1.0:
+            return wav_path, None  # degenerate or too little silence to justify splicing
+        pieces, mapping, cursor = [], [], 0.0
+        for s, e in cuts:
+            i0, i1 = int(s * sr), int(e * sr)
+            pieces.append(data[i0:i1])
+            seg_len = (i1 - i0) / sr
+            mapping.append((cursor, seg_len, s))
+            cursor += seg_len
+        out = Path(wav_path).with_name(Path(wav_path).stem + ".skip16k.wav")
+        sf.write(out, np.concatenate(pieces), sr, subtype="PCM_16")
+        nemo_logging.info(
+            f"VAD full-file: kept {kept:.1f}s of {duration:.1f}s in {len(cuts)} "
+            f"speech regions ({duration - kept:.1f}s silence skipped)"
+        )
+        return str(out), mapping
+    except Exception as exc:
+        nemo_logging.warning(f"VAD full-file splice skipped ({type(exc).__name__}: {exc})")
+        return wav_path, None
+
+
+def map_spliced_time(mapping: list[tuple[float, float, float]], pos: float) -> float:
+    """Map a position from the spliced timeline back onto the original file."""
+    if not mapping:
+        return pos
+    for spliced_pos, length, orig in mapping:
+        if spliced_pos - 1e-6 <= pos < spliced_pos + length:
+            return orig + (pos - spliced_pos)
+    last_sp, last_len, last_orig = mapping[-1]
+    if pos >= last_sp:  # exact end / tiny float overshoot -> clamp to region end
+        return last_orig + last_len
+    return pos
+
+
+def trim_edge_silence(
+    wav_path: str | os.PathLike, pad: float = 0.3, quantum: float = 0.8
+) -> tuple[str, float]:
+    """Strip leading/trailing silence so diarization+ASR never pays for dead air.
+
+    ``quantum`` is the streaming chunk step in seconds: cut points are floored
+    to multiples of it, which keeps every retained audio frame on the same
+    chunk grid the untrimmed file would have used (verified output-identical).
+    Returns ``(model_path, leading_offset)``: feed ``model_path`` to
+    :meth:`Transcriber.transcribe` with ``offset=leading_offset`` so segment
+    timestamps stay valid on the ORIGINAL (untrimmed playback) timeline.
+    Always safe: any failure falls back to the untouched input.
+    """
+    wav_path = os.fspath(wav_path)
+    try:
+        import soundfile as sf
+
+        data, sr = sf.read(wav_path, dtype="float32")
+        duration = len(data) / sr
+        ts = _vad_regions(data, sr)
+        if not ts:
+            return wav_path, 0.0
+        q = max(0.01, float(quantum))
+        # Floor to the chunk grid: retained frames keep their grid alignment.
+        start = min(max(_floor((ts[0][0] - pad) / q) * q, 0.0), duration)
+        end = min(max(_ceil((ts[-1][1] + pad) / q) * q, 0.0), duration)
+        lead, trail = start, duration - end
+        if lead + trail < 1.0:  # not worth a rewrite
+            return wav_path, 0.0
+        out = Path(wav_path).with_name(Path(wav_path).stem + ".trim16k.wav")
+        sf.write(out, data[int(start * sr) : int(end * sr)], sr, subtype="PCM_16")
+        nemo_logging.info(f"VAD trimmed {lead:.1f}s leading / {trail:.1f}s trailing silence")
+        return str(out), float(start)
+    except Exception as exc:
+        nemo_logging.warning(f"VAD edge-silence trim skipped ({type(exc).__name__}: {exc})")
+        return wav_path, 0.0
 
 
 class Transcriber:
@@ -234,6 +386,12 @@ class Transcriber:
         )
         scfg = self.asr_model.encoder.streaming_cfg
         diar_chunk_len = scfg.valid_out_len + scfg.cache_drop_size
+        # Streaming chunk step in seconds; VAD cut points are floored to it so
+        # the encoder sees the exact same frames it would have untrimmed.
+        self.chunk_step_sec = (
+            diar_chunk_len * self.asr_model.encoder.subsampling_factor
+            * PIPELINE_CFG["feat_len_sec"]
+        )
 
         cfg = OmegaConf.create(dict(PIPELINE_CFG, device=str(map_location)))
         if max_speakers:
@@ -255,7 +413,7 @@ class Transcriber:
         self.device = map_location
 
     @torch.inference_mode()
-    def transcribe(self, wav_path: str | os.PathLike, publish=None) -> list[dict]:
+    def transcribe(self, wav_path: str | os.PathLike, publish=None, offset: float = 0.0) -> list[dict]:
         wav_path = os.fspath(wav_path)
         if _is_silent_wav(wav_path):
             return []
@@ -310,7 +468,7 @@ class Transcriber:
                     # speaker-wise sentence lists; copy each dict so the next step's
                     # _update_last_sentence can never tear a published row.
                     partial = [
-                        self._normalize(dict(s))
+                        self._normalize(dict(s), offset)
                         for st in streamer.instance_manager.batch_asr_states
                         for s in st.seglsts
                         if (s.get("words") or "").strip()
@@ -321,10 +479,10 @@ class Transcriber:
                     pass  # progress must never sink the run
 
         seglsts = streamer.generate_seglst_dicts_from_parallel_streaming(samples=samples)
-        return [self._normalize(seg) for seg in seglsts]
+        return [self._normalize(seg, offset) for seg in seglsts]
 
     @staticmethod
-    def _normalize(seg: dict) -> dict:
+    def _normalize(seg: dict, offset: float = 0.0) -> dict:
         # SegLST sentence dicts from NeMo: keys 'words', 'start_time', 'end_time', 'speaker'
         text = (seg.get("words") or seg.get("text") or "").strip()
         start = seg.get("start_time", seg.get("start", 0.0))
@@ -335,8 +493,8 @@ class Transcriber:
         speaker = str(speaker).replace("spk_", "speaker_")
         return {
             "text": text,
-            "start": round(float(start), 3),
-            "end": round(float(end), 3),
+            "start": round(float(start) + offset, 3),
+            "end": round(float(end) + offset, 3),
             "speaker": speaker,
         }
 
@@ -350,15 +508,22 @@ if __name__ == "__main__":  # CLI smoke test: python pipeline.py audio.wav
     ap.add_argument("--device", default=None, help="cuda / cpu")
     ap.add_argument("--max-speakers", type=int, default=None)
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--no-vad-trim", action="store_true",
+                    help="disable Silero VAD trimming of leading/trailing silence")
     args = ap.parse_args()
 
     t = Transcriber(device=args.device, max_speakers=args.max_speakers)
     work = Path(args.audio).stem + ".16k.wav"
     converted = not str(args.audio).endswith(".16k.wav")
     wav = prepare_audio(args.audio, work) if converted else args.audio
+    model_wav, vad_off = (wav, 0.0) if args.no_vad_trim else trim_edge_silence(
+        wav, quantum=getattr(t, "chunk_step_sec", 0.8)
+    )
     try:
-        segs = t.transcribe(wav)
+        segs = t.transcribe(model_wav, offset=vad_off)
     finally:
+        if os.fspath(model_wav) != os.fspath(wav):
+            Path(model_wav).unlink(missing_ok=True)
         if converted:
             Path(wav).unlink(missing_ok=True)
     print(json.dumps(segs, ensure_ascii=False, indent=1))
