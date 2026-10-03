@@ -133,7 +133,7 @@ def prepare_audio(src: str | os.PathLike, dst_wav: str | os.PathLike) -> str:
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 or not Path(dst_wav).is_file():
-        raise RuntimeError(f"audio conversion failed: {proc.stderr.strip() or src}")
+        raise RuntimeError(f"audio conversion failed (ffmpeg rc={proc.returncode}): {proc.stderr.strip() or src}")
     return dst_wav
 
 
