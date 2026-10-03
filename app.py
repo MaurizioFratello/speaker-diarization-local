@@ -26,7 +26,13 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
-from pipeline import Transcriber, prepare_audio
+from pipeline import (
+    Transcriber,
+    map_spliced_time,
+    prepare_audio,
+    splice_speech_regions,
+    trim_edge_silence,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -39,6 +45,13 @@ for d in (UPLOAD_DIR, RESULTS_DIR):
 for _p in UPLOAD_DIR.iterdir():
     if _p.is_file():
         _p.unlink(missing_ok=True)
+
+# Persistent pending queue: uploads land here and survive restarts until a
+# worker claims them; transcode leftovers from before a crash do not.
+QUEUE_DIR = DATA_DIR / "queue"
+QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+for _p in QUEUE_DIR.glob("*.16k.wav"):  # pending originals stay for requeue
+    _p.unlink(missing_ok=True)
 
 _shutdown = threading.Event()
 
@@ -67,6 +80,21 @@ jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 gpu_executor = ThreadPoolExecutor(max_workers=1)  # serialize GPU work
 
+# Silero VAD leading/trailing silence trim (set False via --no-vad-trim).
+VAD_TRIM = True
+
+# FIFO of submitted job ids awaiting their turn on the GPU.
+_queue: list[str] = []
+MAX_QUEUED = 8
+_convert_lock = threading.Lock()  # one ffmpeg conversion at a time
+_gpu_lock = threading.Lock()  # one transcription on the GPU at a time
+# Set once the first model-load attempt (preload or first job) finishes;
+# concurrent jobs wait on it instead of starting a second racing load.
+model_ready_event = threading.Event()
+# Set once a Transcriber load has actually begun (preload thread or first job);
+# jobs only wait on model_ready_event when someone else is mid-load.
+_model_load_active = threading.Event()
+
 
 # --------------------------------------------------------------------------- models
 
@@ -76,11 +104,14 @@ def get_transcriber(device: str | None) -> Transcriber:
         if transcriber_error:
             raise RuntimeError(transcriber_error)
         if transcriber is None:
+            _model_load_active.set()
             try:
                 transcriber = Transcriber(device=device)
             except Exception as exc:  # surface load failure to clients
                 transcriber_error = f"{type(exc).__name__}: {exc}"
                 raise
+            finally:
+                model_ready_event.set()
         elif device is not None and transcriber.device.type != device:
             raise HTTPException(
                 409,
@@ -142,7 +173,8 @@ def _result_path(job_id: str) -> Path:
 
 def _save_result(job: dict) -> None:
     _result_path(job["id"]).write_text(
-        json.dumps({"name": job.get("name"), "segments": job["segments"], "labels": job.get("labels") or {}}, ensure_ascii=False, indent=1),
+        json.dumps({"name": job.get("name"), "segments": job["segments"], "labels": job.get("labels") or {},
+                    "vad_full": bool(job.get("vad_full"))}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
     # Human-readable markdown copy saved alongside the machine-readable result;
@@ -166,6 +198,7 @@ def _lookup_job(job_id: str) -> dict | None:
         return None
     segs = data["segments"] if isinstance(data, dict) else data
     labels = data.get("labels", {}) if isinstance(data, dict) else {}
+    vad_full = bool(data.get("vad_full")) if isinstance(data, dict) else False
     if not isinstance(segs, list):
         return None
     name = data.get("name") if isinstance(data, dict) else None
@@ -175,6 +208,7 @@ def _lookup_job(job_id: str) -> dict | None:
     job = {
         "id": job_id, "name": name, "status": "done", "stage": None, "error": None,
         "elapsed": None, "segments": segs, "labels": labels,
+        "vad_full": vad_full,
         "duration": round(max((s.get("end", 0.0) for s in segs), default=0.0), 1),
         "speakers": sorted({s.get("speaker", "speaker_0") for s in segs}),
     }
@@ -182,10 +216,17 @@ def _lookup_job(job_id: str) -> dict | None:
     return job
 
 
-def _sweep_uploads(keep: Path | None, force: bool = False) -> None:
+def _sweep_uploads(keep, force: bool = False) -> None:
     """Delete upload/transcode scratch except files of queued/running jobs and `keep`.
 
-    With force=True (shutdown), live jobs' files go too."""
+    `keep` may be a Path, a list of Paths, or None. With force=True (shutdown),
+    live jobs' files go too."""
+    if keep is None:
+        keep_names = set()
+    elif isinstance(keep, (list, tuple, set)):
+        keep_names = {str(p) for p in keep}
+    else:
+        keep_names = {str(keep)}
     live = set()
     if not force:
         with jobs_lock:
@@ -193,7 +234,7 @@ def _sweep_uploads(keep: Path | None, force: bool = False) -> None:
                 if j["status"] in ("queued", "running"):
                     live.add(str(j["id"]))
     for p in UPLOAD_DIR.iterdir():
-        if p == keep or p.name.split(".")[0] in live:
+        if str(p) in keep_names or p.name.split(".")[0] in live:
             continue
         p.unlink(missing_ok=True)
 
@@ -203,31 +244,68 @@ def _check_shutdown() -> None:
         raise RuntimeError("Server is shutting down")
 
 
-def run_job(job_id: str, src_path: Path, device: str | None) -> None:
+def run_job(job_id: str, src_path: Path, device: str | None, vad_full: bool = False) -> None:
     job = jobs[job_id]
+    wav = None
+    model_wav = None
+    with jobs_lock:
+        if job_id in _queue:
+            _queue.remove(job_id)
     try:
         t0 = time.time()
+        if src_path.parent != UPLOAD_DIR:  # claimed from the persistent queue dir
+            dst = UPLOAD_DIR / src_path.name
+            shutil.move(str(src_path), dst)
+            src_path = dst
         wav = src_path.with_name(src_path.stem + ".16k.wav")
         job["stage"] = "converting"
-        prepare_audio(src_path, wav)
+        with _convert_lock:
+            prepare_audio(src_path, wav)
         # the uploaded file is single-use: consumed by the conversion
         src_path.unlink(missing_ok=True)
         _check_shutdown()
         with wave.open(str(wav)) as _w:
             job["duration"] = round(_w.getnframes() / _w.getframerate(), 1)
+        # Wait for a shared model load (preload thread or a racing job) before
+        # touching the GPU: two concurrent Transcriber loads OOM the laptop GPU.
         job["stage"] = "loading-models"
+        if _model_load_active.is_set() and not model_ready_event.is_set():
+            model_ready_event.wait(timeout=600)
         tr = get_transcriber(device)
         _check_shutdown()
-        job["stage"] = "transcribing"
-        total = job["duration"] or 1.0
+        with _gpu_lock:
+            job["stage"] = "transcribing"
+            total = job["duration"] or 1.0
+            quantum = getattr(tr, "chunk_step_sec", 0.8)
+            mapping = None
+            vad_off = 0.0
+            model_wav = str(wav)
+            if vad_full:
+                model_wav, mapping = splice_speech_regions(wav, quantum=quantum)
+            elif VAD_TRIM:
+                model_wav, vad_off = trim_edge_silence(wav, quantum=quantum)
+            model_dur = (mapping[-1][0] + mapping[-1][1]) if mapping else total
 
-        def _publish(step, partial):
-            job["step"] = step
-            job["partial"] = partial
-            job["partial_speakers"] = sorted({p["speaker"] for p in partial})
-            job["progress"] = min(1.0, round(max((p["end"] for p in partial), default=0.0) / total, 3))
+            def _remap(partial):
+                for p in partial:
+                    p["start"] = round(map_spliced_time(mapping, p["start"]), 3)
+                    p["end"] = round(map_spliced_time(mapping, p["end"]), 3)
+                return partial
 
-        segs = tr.transcribe(wav, publish=_publish)
+            def _publish(step, partial):
+                if mapping:
+                    _remap(partial)
+                job["step"] = step
+                job["partial"] = partial
+                job["partial_speakers"] = sorted({p["speaker"] for p in partial})
+                if mapping:  # spliced stream: remapped ends plateau, drive by step
+                    job["progress"] = min(1.0, round(step * max(quantum, 0.05) / max(model_dur, 1.0), 3))
+                else:
+                    job["progress"] = min(1.0, round(max((p["end"] for p in partial), default=0.0) / total, 3))
+
+            segs = tr.transcribe(model_wav, publish=_publish, offset=vad_off)
+        if mapping:
+            _remap(segs)
         _check_shutdown()
         # drop empty texts
         segs = [s for s in segs if s["text"]]
@@ -243,11 +321,54 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
         )
         _save_result(job)
         _sweep_uploads(wav)
+        (QUEUE_DIR / f"{job_id}.json").unlink(missing_ok=True)
     except Exception as exc:
         traceback.print_exc()
-        wav.unlink(missing_ok=True)
+        (QUEUE_DIR / f"{job_id}.json").unlink(missing_ok=True)
+        if model_wav is not None and wav is not None and str(model_wav) != str(wav):
+            Path(model_wav).unlink(missing_ok=True)
+        if wav is not None:
+            wav.unlink(missing_ok=True)
         src_path.unlink(missing_ok=True)
         job.update(status="error", error=f"{type(exc).__name__}: {exc}", stage=None, partial=None)
+
+
+def _requeue_pending() -> None:
+    """Re-enqueue jobs that were submitted but never claimed (server restart).
+
+    A job whose queued file was already claimed (moved into uploads, which the
+    boot sweep wipes) cannot be replayed — its leftover metadata is dropped and
+    the client sees "Unknown job" and re-uploads.
+    """
+    items = []
+    for meta in QUEUE_DIR.glob("*.json"):
+        try:
+            d = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta.unlink(missing_ok=True)
+            continue
+        jid = str(d.get("id", ""))
+        if not re.fullmatch(r"[0-9a-f]{12}", jid):
+            meta.unlink(missing_ok=True)
+            continue
+        src = QUEUE_DIR / str(d.get("src", ""))
+        if not src.is_file():
+            alt = UPLOAD_DIR / str(d.get("src", ""))
+            src = alt if alt.is_file() else src
+        if not src.is_file():
+            meta.unlink(missing_ok=True)  # source vanished mid-flight
+            continue
+        items.append((float(d.get("submitted_at", 0.0)), jid, d, src))
+    for _, jid, d, src in sorted(items):
+        if jid in jobs:
+            continue
+        jobs[jid] = {"id": jid, "name": d.get("name", f"{jid}.audio"), "status": "queued",
+                     "stage": None, "segments": None,
+                     "vad_full": bool(d.get("vad_full"))}
+        _queue.append(jid)
+        gpu_executor.submit(run_job, jid, src, d.get("device"),
+                            bool(d.get("vad_full")))
+        print(f"[queue] requeued job {jid} ({jobs[jid]['name']})", flush=True)
 
 
 # --------------------------------------------------------------------------- routes
@@ -266,7 +387,7 @@ async def api_transcribe(request: Request):
     if not SAFE_EXT.match(ext or ""):
         ext = ".bin"
     job_id = uuid.uuid4().hex[:12]
-    src = UPLOAD_DIR / f"{job_id}{ext}"
+    src = QUEUE_DIR / f"{job_id}{ext}"
     with src.open("wb") as fh:
         shutil.copyfileobj(upload.file, fh)
     if src.stat().st_size == 0:
@@ -276,11 +397,23 @@ async def api_transcribe(request: Request):
     device = None
     if "cpu" in form:
         device = "cpu"
-    job = {"id": job_id, "name": name, "status": "queued", "stage": None, "segments": None}
+    vad_full = "vad_full" in form
+    job = {"id": job_id, "name": name, "status": "queued", "stage": None,
+           "segments": None, "vad_full": vad_full}
     with jobs_lock:
+        if len(_queue) >= MAX_QUEUED:
+            src.unlink(missing_ok=True)
+            raise HTTPException(429, f"Queue full ({MAX_QUEUED} jobs) — try again later.")
         jobs[job_id] = job
-    gpu_executor.submit(run_job, job_id, src, device)
-    return {"job_id": job_id}
+        _queue.append(job_id)
+        pos = len(_queue) - 1
+        (QUEUE_DIR / f"{job_id}.json").write_text(
+            json.dumps({"id": job_id, "name": name, "src": src.name, "device": device,
+                        "vad_full": vad_full,
+                        "submitted_at": time.time()}, ensure_ascii=False),
+            encoding="utf-8")
+    gpu_executor.submit(run_job, job_id, src, device, vad_full)
+    return {"job_id": job_id, "queue_pos": pos}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -288,7 +421,9 @@ async def api_job(job_id: str):
     job = _lookup_job(job_id)
     if job is None:
         raise HTTPException(404, "Unknown job.")
-    keep = {k: job.get(k) for k in ("id", "name", "status", "stage", "error", "elapsed", "duration", "speakers", "labels")}
+    keep = {k: job.get(k) for k in ("id", "name", "status", "stage", "error", "elapsed", "duration", "speakers", "labels", "vad_full")}
+    with jobs_lock:
+        keep["queue_pos"] = _queue.index(job_id) if job_id in _queue else None
     keep["has_media"] = (UPLOAD_DIR / f"{job_id}.16k.wav").is_file() or any(
         UPLOAD_DIR.glob(f"{job_id}.*")
     )
@@ -382,7 +517,15 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--device", default=None, help="cuda (default) or cpu")
     ap.add_argument("--preload", action="store_true", help="load models at startup")
+    ap.add_argument("--no-vad-trim", action="store_true",
+                    help="disable Silero VAD trimming of leading/trailing silence")
     args = ap.parse_args()
+
+    global VAD_TRIM
+    if args.no_vad_trim:
+        VAD_TRIM = False
+
+    _requeue_pending()
 
     if args.preload:
         threading.Thread(target=lambda: get_transcriber(args.device), daemon=True).start()
