@@ -1,0 +1,273 @@
+{
+  "id": "ami_es2004a_4spk_55s",
+  "audio": "ami_es2004a_4spk_55s.wav",
+  "retrieved": "2026-10-03",
+  "source": {
+    "url": "https://huggingface.co/datasets/FluidInference/ami-corpus-mirror/resolve/main/sdm/ES2004a.Mix-Headset.wav",
+    "sha256": "3e2560b19bee6952c7c7ce041b0f1ea8a7ea9468044c4eea79d2a2c67e24ab0f",
+    "bytes": 33579394,
+    "meeting": "ES2004a",
+    "full_meeting_duration_s": 1049.36,
+    "slice": [
+      352.0,
+      407.0
+    ],
+    "gt_sources": {
+      "rttm": "https://raw.githubusercontent.com/pyannote/AMI-diarization-setup/main/only_words/rttms/test/ES2004a.rttm",
+      "words": "https://huggingface.co/datasets/ggfox00000/dia-AMICorpus-all/resolve/main/ami_public_manual_1.6.2/words/<A-D>.xml",
+      "roles": "https://huggingface.co/datasets/ggfox00000/dia-AMICorpus-all/resolve/main/ami_public_manual_1.6.2/corpusResources/meetings.xml"
+    },
+    "license": "CC-BY-4.0 (AMI Consortium / Edinburgh; NOTSOFAR: Microsoft, CC BY 4.0)"
+  },
+  "audio_format": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "encoding": "pcm_s16le",
+    "duration_s": 55.0,
+    "frames": 880000
+  },
+  "speakers": {
+    "MEO015": {
+      "channel": "A",
+      "role": "UI"
+    },
+    "FEE013": {
+      "channel": "B",
+      "role": "PM"
+    },
+    "MEE014": {
+      "channel": "C",
+      "role": "ID"
+    },
+    "FEE016": {
+      "channel": "D",
+      "role": "ME"
+    }
+  },
+  "scene": "Four-person AMI scenario design meeting; the team reacts to MEE014's doodle of an animal logo (dog / beak / T-Rex / pelican / crocodile). Playful, strongly overlapping, lots of backchannels and laughter.",
+  "reference_turns": [
+    {
+      "text": "Yeah I'll have a go.",
+      "start": 1.48,
+      "end": 3.55,
+      "speaker": "MEE014",
+      "raw_text": "Yeah I'll have a go.",
+      "non_lexical": false
+    },
+    {
+      "text": "Okay.",
+      "start": 2.11,
+      "end": 2.82,
+      "speaker": "MEO015",
+      "raw_text": "Okay.",
+      "non_lexical": false
+    },
+    {
+      "text": "Sorry.",
+      "start": 4.33,
+      "end": 4.9,
+      "speaker": "MEO015",
+      "raw_text": "Sorry.",
+      "non_lexical": false
+    },
+    {
+      "text": "Please, please leave me a space at the bottom, I'm little, you can get to the top with standing on a chair.",
+      "start": 4.51,
+      "end": 10.14,
+      "speaker": "FEE016",
+      "raw_text": "Please, please leave me a space at the bottom, I'm little, you can get to the top with standing on a chair.",
+      "non_lexical": false
+    },
+    {
+      "text": "Alright, okay. Well since you guys have chosen the ones I wanted to do, I'll have to have to go for something a bit random.",
+      "start": 4.98,
+      "end": 15.65,
+      "speaker": "MEE014",
+      "raw_text": "Alright, okay. Well since you guys have chosen the ones I wanted to do, I'll have to have to go for something a bit random.",
+      "non_lexical": false
+    },
+    {
+      "text": "Okay.",
+      "start": 12.81,
+      "end": 14.01,
+      "speaker": "FEE013",
+      "raw_text": "Okay.",
+      "non_lexical": false
+    },
+    {
+      "text": "Does it look like a dog actually?",
+      "start": 13.93,
+      "end": 15.84,
+      "speaker": "MEO015",
+      "raw_text": "Does it look like a dog actually?",
+      "non_lexical": false
+    },
+    {
+      "text": "And also, my drawing skill isn't that great so, yeah.",
+      "start": 19.43,
+      "end": 23.29,
+      "speaker": "MEE014",
+      "raw_text": "And also, my drawing skill isn't that great so, yeah.",
+      "non_lexical": false
+    },
+    {
+      "text": "Well, as you can see, the quality of the work today is um",
+      "start": 21.84,
+      "end": 24.83,
+      "speaker": "FEE013",
+      "raw_text": "Well, as you can see, the quality of the work today is um",
+      "non_lexical": false
+    },
+    {
+      "text": "Mm",
+      "start": 23.08,
+      "end": 23.43,
+      "speaker": "MEO015",
+      "raw_text": "Mm",
+      "non_lexical": false
+    },
+    {
+      "text": "I think it's outstandingly good.",
+      "start": 24.8,
+      "end": 26.94,
+      "speaker": "FEE016",
+      "raw_text": "I think it's outstandingly good.",
+      "non_lexical": false
+    },
+    {
+      "text": "Okay, now I'm gonna have to change what is was originally gonna be because that looks like a beak now, so.",
+      "start": 27.6,
+      "end": 32.48,
+      "speaker": "MEE014",
+      "raw_text": "Okay, now I'm gonna have to change what is was originally gonna be because that looks like a beak now, so.",
+      "non_lexical": false
+    },
+    {
+      "text": "Crocodile?",
+      "start": 39.13,
+      "end": 39.74,
+      "speaker": "FEE016",
+      "raw_text": "Crocodile?",
+      "non_lexical": false
+    },
+    {
+      "text": "Gonna be a bird.",
+      "start": 41.99,
+      "end": 42.92,
+      "speaker": "FEE013",
+      "raw_text": "Gonna be a bird.",
+      "non_lexical": false
+    },
+    {
+      "text": "Yeah, it can be a crocodile, it can be a crocodile. Well it was it was an at first firstly it was an attempt at a T_Rex and then it sort of changed into a pelican but it can be a crocodile now actually",
+      "start": 42.38,
+      "end": 54.27,
+      "speaker": "MEE014",
+      "raw_text": "Yeah, it can be a crocodile, it can be a crocodile. Well it was it was an at first firstly it was an attempt at a T_Rex and then it sort of changed into a pelican but it can be a crocodile now actually",
+      "non_lexical": false
+    },
+    {
+      "text": "Is it gonna be it's gonna be a bird.",
+      "start": 44.31,
+      "end": 47.8,
+      "speaker": "FEE013",
+      "raw_text": "Is it gonna be it's gonna be a bird.",
+      "non_lexical": false
+    }
+  ],
+  "non_lexical": [
+    {
+      "start": 12.336,
+      "end": 12.336,
+      "speaker": "MEO015",
+      "type": "laugh"
+    },
+    {
+      "start": 45.65,
+      "end": 47.178,
+      "speaker": "MEO015",
+      "type": "laugh"
+    },
+    {
+      "start": 6.816,
+      "end": 8.912,
+      "speaker": "FEE013",
+      "type": "laugh"
+    },
+    {
+      "start": 12.608,
+      "end": 12.608,
+      "speaker": "FEE013",
+      "type": "laugh"
+    },
+    {
+      "start": 27.452,
+      "end": 27.452,
+      "speaker": "FEE013",
+      "type": "laugh"
+    },
+    {
+      "start": 30.048,
+      "end": 31.223,
+      "speaker": "FEE013",
+      "type": "laugh"
+    },
+    {
+      "start": 46.76,
+      "end": 46.76,
+      "speaker": "FEE013",
+      "type": "laugh"
+    },
+    {
+      "start": 53.306,
+      "end": 55.104,
+      "speaker": "FEE013",
+      "type": "laugh"
+    },
+    {
+      "start": 38.412,
+      "end": 38.412,
+      "speaker": "MEE014",
+      "type": "cough"
+    },
+    {
+      "start": 45.95,
+      "end": 45.95,
+      "speaker": "MEE014",
+      "type": "laugh"
+    },
+    {
+      "start": 54.27,
+      "end": 54.27,
+      "speaker": "MEE014",
+      "type": "laugh"
+    },
+    {
+      "start": 21.52,
+      "end": 22.626,
+      "speaker": "FEE016",
+      "type": "laugh"
+    },
+    {
+      "start": 26.94,
+      "end": 27.584,
+      "speaker": "FEE016",
+      "type": "laugh"
+    },
+    {
+      "start": 45.008,
+      "end": 46.565,
+      "speaker": "FEE016",
+      "type": "laugh"
+    },
+    {
+      "start": 53.28,
+      "end": 55.376,
+      "speaker": "FEE016",
+      "type": "laugh"
+    }
+  ],
+  "turn_notes": {
+    "window edges": "slice starts 351.09-353.48 s silence, ends 406.27-420.11 s silence; no turn truncated"
+  }
+}

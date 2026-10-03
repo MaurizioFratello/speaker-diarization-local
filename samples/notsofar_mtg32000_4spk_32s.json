@@ -1,0 +1,227 @@
+{
+  "id": "notsofar_mtg32000_4spk_32s",
+  "audio": "notsofar_mtg32000_4spk_32s.wav",
+  "retrieved": "2026-10-03",
+  "source": {
+    "url": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/main/benchmark-datasets/eval_set/240629.1_eval_small_with_GT/MTG/MTG_32000/sc_meetup_0/ch0.wav",
+    "sha256": "8b43d41c70b761cae7be761cfec5514d148548c37aa1b4f5ee9820f7f5d33b16",
+    "bytes": 11628288,
+    "meeting": "MTG_32000",
+    "full_meeting_duration_s": 363.382625,
+    "slice": [
+      129.5,
+      161.75
+    ],
+    "gt_sources": {
+      "gt_transcription": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/main/benchmark-datasets/eval_set/240629.1_eval_small_with_GT/MTG/MTG_32000/gt_transcription.json",
+      "gt_meeting_metadata": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/main/benchmark-datasets/eval_set/240629.1_eval_small_with_GT/MTG/MTG_32000/gt_meeting_metadata.json",
+      "devices": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/main/benchmark-datasets/eval_set/240629.1_eval_small_with_GT/MTG/MTG_32000/devices.json"
+    },
+    "license": "CC-BY-4.0 (AMI Consortium / Edinburgh; NOTSOFAR: Microsoft, CC BY 4.0)"
+  },
+  "audio_format": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "encoding": "pcm_s16le",
+    "duration_s": 32.25,
+    "frames": 516000
+  },
+  "speakers": {
+    "Ron": {
+      "device": "CT_20"
+    },
+    "Sarah": {
+      "device": "CT_21"
+    },
+    "Linda": {
+      "device": "CT_22"
+    },
+    "Rachel": {
+      "device": "CT_24"
+    }
+  },
+  "scene": "Natural Microsoft-Garage-style NOTSOFAR-1 meeting (room 10030, topic 'Design a city park'), recorded on one tabletop device: far-field speech plus cross-talk. Realistic 'user uploaded a meeting recording' case.",
+  "reference_turns": [
+    {
+      "text": "Don't point out.",
+      "start": 0.39,
+      "end": 1.54,
+      "speaker": "Rachel",
+      "raw_text": "Don't point out.",
+      "non_lexical": false
+    },
+    {
+      "text": "Oh.",
+      "start": 0.46,
+      "end": 0.74,
+      "speaker": "Ron",
+      "raw_text": "Oh.",
+      "non_lexical": false
+    },
+    {
+      "text": "Well then then we need to think about accessibility.",
+      "start": 0.83,
+      "end": 3.65,
+      "speaker": "Linda",
+      "raw_text": "Well then then we need to think about accessibility.",
+      "non_lexical": false
+    },
+    {
+      "text": "Yes.",
+      "start": 4.08,
+      "end": 4.81,
+      "speaker": "Rachel",
+      "raw_text": "Yes.",
+      "non_lexical": false
+    },
+    {
+      "text": "OK.",
+      "start": 4.22,
+      "end": 4.82,
+      "speaker": "Linda",
+      "raw_text": "OK.",
+      "non_lexical": false
+    },
+    {
+      "text": "so of the There There should be you know the accessibility concerns.",
+      "start": 5.04,
+      "end": 8.7,
+      "speaker": "Linda",
+      "raw_text": "so of the There There should be you know the accessibility concerns.",
+      "non_lexical": false
+    },
+    {
+      "text": "Sarah.",
+      "start": 7.41,
+      "end": 8.02,
+      "speaker": "Rachel",
+      "raw_text": "Sarah.",
+      "non_lexical": false
+    },
+    {
+      "text": "I know you are young, but",
+      "start": 8.89,
+      "end": 10.16,
+      "speaker": "Rachel",
+      "raw_text": "I know you are young, but",
+      "non_lexical": false
+    },
+    {
+      "text": "Physical safety.",
+      "start": 9.86,
+      "end": 11.18,
+      "speaker": "Linda",
+      "raw_text": "Physical safety.",
+      "non_lexical": false
+    },
+    {
+      "text": "I think Linda is saying some good things.",
+      "start": 11.6,
+      "end": 13.21,
+      "speaker": "Sarah",
+      "raw_text": "I think Linda is saying some good things.",
+      "non_lexical": false
+    },
+    {
+      "text": "Yeah.",
+      "start": 11.61,
+      "end": 11.86,
+      "speaker": "Linda",
+      "raw_text": "Yeah.",
+      "non_lexical": false
+    },
+    {
+      "text": "Um",
+      "start": 13.54,
+      "end": 14.13,
+      "speaker": "Sarah",
+      "raw_text": "Um",
+      "non_lexical": false
+    },
+    {
+      "text": "but I think it's also important to see what features we can bring into the park, not",
+      "start": 14.26,
+      "end": 18.06,
+      "speaker": "Sarah",
+      "raw_text": "but I think it's also important to see what features we can bring into the park, not",
+      "non_lexical": false
+    },
+    {
+      "text": "just how we can be accessible.",
+      "start": 18.43,
+      "end": 20.36,
+      "speaker": "Sarah",
+      "raw_text": "just how we can be accessible.",
+      "non_lexical": false
+    },
+    {
+      "text": "Yes.",
+      "start": 19.29,
+      "end": 19.93,
+      "speaker": "Rachel",
+      "raw_text": "Yes.",
+      "non_lexical": false
+    },
+    {
+      "text": "Right.",
+      "start": 21.15,
+      "end": 21.53,
+      "speaker": "Ron",
+      "raw_text": "Right.",
+      "non_lexical": false
+    },
+    {
+      "text": "Yeah.",
+      "start": 21.79,
+      "end": 22.06,
+      "speaker": "Rachel",
+      "raw_text": "Yeah.",
+      "non_lexical": false
+    },
+    {
+      "text": "Follow your start.",
+      "start": 22.13,
+      "end": 23.42,
+      "speaker": "Rachel",
+      "raw_text": "Follow your start.",
+      "non_lexical": false
+    },
+    {
+      "text": "So So I'm thinking about different uh playground um areas with",
+      "start": 22.24,
+      "end": 27.3,
+      "speaker": "Ron",
+      "raw_text": "So So I'm thinking about different uh playground um areas with",
+      "non_lexical": false
+    },
+    {
+      "text": "for the kids, so places for them to climb, places for them to run",
+      "start": 27.94,
+      "end": 31.87,
+      "speaker": "Ron",
+      "raw_text": "for the kids, so places for them to climb, places for them to run",
+      "non_lexical": false
+    },
+    {
+      "text": "Yes.",
+      "start": 30.19,
+      "end": 30.75,
+      "speaker": "Rachel",
+      "raw_text": "Yes.",
+      "non_lexical": false
+    },
+    {
+      "text": "Yeah.",
+      "start": 31.81,
+      "end": 32.14,
+      "speaker": "Rachel",
+      "raw_text": "Yeah.",
+      "non_lexical": false
+    }
+  ],
+  "non_lexical": [],
+  "turn_notes": {
+    "timing": "GT timings from close-talk recordings; score with >=0.25 s collar (device clock offset unpublished)",
+    "window edges": "slice starts in 129.19-129.89 gap, ends in 161.64-161.83 gap; no turn truncated"
+  }
+}
