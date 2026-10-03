@@ -197,6 +197,12 @@ class Transcriber:
             else:
                 asr_bf16 = False
         asr_dtype = dtype if (asr_bf16 and self.use_bf16) else torch.float32
+        if map_location.type == "cuda":
+            free_gb = torch.cuda.mem_get_info()[0] / 2**30
+            nemo_logging.info(
+                f"ASR weights: {'bf16 (eager decoder)' if asr_dtype != torch.float32 else 'fp32 (CUDA-graph decoder)'}, "
+                f"{free_gb:.1f} GB VRAM free at load"
+            )
         self.asr_model = self.asr_model.to(device=map_location, dtype=asr_dtype).eval()
         if asr_dtype != torch.float32:
             inner = getattr(self.asr_model.decoding, "decoding", None)
@@ -261,6 +267,12 @@ class Transcriber:
             online_normalization=cfg.online_normalization,
             pad_and_drop_preencoded=cfg.pad_and_drop_preencoded,
         )
+        if self.device.type == "cuda":
+            # Keep the whole-file waveform and mel features in CPU RAM: running the
+            # mel front-end over long files on the GPU asks for gigabyte-scale
+            # one-shot allocations. Only per-step chunks move to the GPU below.
+            buffer.get_model_device = lambda: torch.device("cpu")
+            buffer.preprocessor = buffer.preprocessor.to("cpu")
         buffer.append_audio_file(audio_filepath=wav_path, stream_id=-1)
         streamer = SpeakerTaggedASR(cfg, self.asr_model, self.diar_model)
 
@@ -270,6 +282,10 @@ class Transcriber:
         for step_num, (chunk_audio, chunk_lengths, diar_chunk_audio, diar_chunk_lengths) in enumerate(
             buffer.iter_with_right_context(diar_right_offset)
         ):
+            chunk_audio = chunk_audio.to(self.device)
+            chunk_lengths = chunk_lengths.to(self.device)
+            diar_chunk_audio = diar_chunk_audio.to(self.device)
+            diar_chunk_lengths = diar_chunk_lengths.to(self.device)
             drop_extra_pre_encoded = (
                 0
                 if step_num == 0 and not cfg.pad_and_drop_preencoded

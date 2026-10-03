@@ -55,6 +55,12 @@ def get_transcriber(device: str | None) -> Transcriber:
             except Exception as exc:  # surface load failure to clients
                 transcriber_error = f"{type(exc).__name__}: {exc}"
                 raise
+        elif device is not None and transcriber.device.type != device:
+            raise HTTPException(
+                409,
+                f"Models are already loaded on '{transcriber.device.type}'; "
+                f"restart the server to switch to '{device}'.",
+            )
         return transcriber
 
 
