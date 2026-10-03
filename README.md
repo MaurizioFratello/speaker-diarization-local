@@ -74,6 +74,10 @@ non-mutating snapshots of the streaming decoder between chunks). Downloads,
 copy and speaker renaming stay disabled until the job finishes; playback in
 the meantime is fully available.
 
+One job at a time: while a transcription runs, the drop zone locks (new
+drops and clicks are rejected until it finishes), so the single transcript
+view never tracks two jobs at once.
+
 Uploads are single-use: the uploaded file is deleted as soon as the audio
 conversion has consumed it, and only the small player transcode remains while
 the job's result is on screen; the upload directory is wiped on every server

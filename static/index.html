@@ -17,6 +17,7 @@
   #drop{border:2px dashed var(--line);border-radius:14px;padding:42px 20px;text-align:center;color:var(--dim);cursor:pointer;transition:.15s;background:var(--panel)}
   #drop.hot{border-color:var(--accent);color:var(--fg);background:var(--panel2)}
   #drop b{color:var(--fg)}
+  #drop.locked{opacity:.45;cursor:progress;border-style:solid;border-color:var(--accent)}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:18px;padding:16px}
   .meta{display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--dim);font-size:13px;align-items:baseline}
   .meta .name{color:var(--fg);font-weight:600;font-size:15px}
@@ -89,16 +90,31 @@ const drop = $("drop"), fileIn = $("file");
 let poll = null;
 let curId = null, curJob = null;
 let follow = true, lastIdx = -1;
+let running = false;
+const dropHTML = drop.innerHTML;
+function setLock(on){
+  running = on;
+  drop.classList.toggle("locked", on);
+  drop.innerHTML = on ? "⏳ Transcribing… the drop zone unlocks when it finishes." : dropHTML;
+  fileIn.disabled = on;
+}
 
-drop.onclick = () => fileIn.click();
+drop.onclick = () => { if (running) { showStatus("Transcription in progress — drop the next file once it finishes.", true); return; } fileIn.click(); };
 fileIn.onchange = () => { uploadAll(fileIn.files); fileIn.value=""; };
 ["dragover","dragenter"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("hot"); }));
 ["dragleave","drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("hot"); }));
 drop.addEventListener("drop", ev => uploadAll(ev.dataTransfer.files));
+// OS file-drops outside the drop zone must never navigate the page (that would kill the poller).
+window.addEventListener("dragover", ev => ev.preventDefault());
+window.addEventListener("dragenter", ev => ev.preventDefault());
+window.addEventListener("drop", ev => ev.preventDefault());
 
 async function uploadAll(files){
+  if (running) { showStatus("Transcription in progress — drop the next file once it finishes.", true); return; }
+  if (files.length > 1) { showStatus(`Please drop files one at a time (${files.length} selected).`, true); return; }
   for (const f of files) {
     if (!validate(f)) continue;
+    setLock(true);
     showStatus(`Uploading ${f.name} …`);
     const fd = new FormData();
     fd.append("file", f, f.name);
@@ -106,7 +122,7 @@ async function uploadAll(files){
       const r = await fetch("/api/transcribe", {method:"POST", body:fd});
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
       pollJob((await r.json()).job_id, f.name);
-    } catch(e){ showStatus(`Failed: ${e.message}`, true); }
+    } catch(e){ setLock(false); showStatus(`Failed: ${e.message}`, true); }
   }
 }
 
@@ -124,7 +140,7 @@ function pollJob(id, name){
     let resp, j;
     try { resp = await fetch(`/api/jobs/${id}`); j = await resp.json(); }
     catch(e){ return; }
-    if (!resp.ok) { clearInterval(poll); showStatus(`${name} — ${j.detail || ("HTTP " + resp.status)}`, true); return; }
+    if (!resp.ok) { clearInterval(poll); setLock(false); showStatus(`${name} — ${j.detail || ("HTTP " + resp.status)}`, true); return; }
     if (j.status === "queued" || j.status === "running" || !j.status) {
       const secs = Math.round((Date.now()-t0)/1000);
       if (j.segments && j.segments.length) {
@@ -135,10 +151,10 @@ function pollJob(id, name){
         showStatus(`${name} — ${STAGES[j.stage] || "Processing…"} (${secs}s)`);
       }
     } else if (j.status === "error") {
-      clearInterval(poll);
+      clearInterval(poll); setLock(false);
       showStatus(`${name} — Error: ${j.error}`, true);
     } else if (j.status === "done") {
-      clearInterval(poll); hideStatus(); render(id, j);
+      clearInterval(poll); hideStatus(); setLock(false); render(id, j);
     }
   }, 1000);
 }
