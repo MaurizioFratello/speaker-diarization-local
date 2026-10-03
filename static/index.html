@@ -37,6 +37,10 @@
   .legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;font-size:13px}
   .hidden{display:none}
   .err{color:#ff7b72}
+  .spk.rnbtn{cursor:pointer}
+  .spk.rnbtn .rn{opacity:.55;font-weight:700;margin-left:2px}
+  .spk.rnbtn:hover .rn{opacity:1}
+  .rnin{width:120px;background:var(--bg);color:var(--fg);border:1px solid var(--accent);border-radius:6px;padding:0 6px;font:inherit;font-size:12px;outline:none}
 </style>
 </head>
 <body>
@@ -73,6 +77,7 @@ const COLORS = ["#4cc2ff","#f78166","#3fb950","#d2a8ff","#f2cc60","#ff7b9c","#2e
 const $ = id => document.getElementById(id);
 const drop = $("drop"), fileIn = $("file");
 let poll = null;
+let curId = null, curJob = null;
 
 drop.onclick = () => fileIn.click();
 fileIn.onchange = () => { uploadAll(fileIn.files); fileIn.value=""; };
@@ -122,24 +127,26 @@ function pollJob(id, name){
 }
 
 function spkColor(s){ return COLORS[(parseInt(s.split("_")[1],10)||0) % COLORS.length]; }
- function spkName(s){ const m = String(s).match(/^(?:speaker|spk)[_ ](\d+)$/i); return m ? "Speaker "+m[1] : String(s); }
+function spkName(s){ const l = curJob && (curJob.labels || {})[s]; if (l) return l; const m = String(s).match(/^(?:speaker|spk)[_ ](\d+)$/i); return m ? "Speaker "+m[1] : String(s); }
 function fmtTime(t){ const m=Math.floor(t/60), s=(t%60); return `${m}:${s.toFixed(1).padStart(4,"0")}`; }
 
 function render(id, job){
+  curId = id; curJob = job;
   $("result").classList.remove("hidden");
   $("rName").textContent = job.name;
   $("rDur").textContent = `⏱ ${fmtTime(job.duration)} audio`;
   $("rSpk").textContent = `👤 ${job.speakers.length} speaker${job.speakers.length===1?"":"s"}`;
-  $("rTime").textContent = `⚙ ${job.elapsed}s processing`;
+  $("rTime").textContent = `⚙ ${job.elapsed ?? "?"}s processing`;
   $("legend").innerHTML = job.speakers.map(s =>
-    `<span class="spk" style="background:${spkColor(s)}22;color:${spkColor(s)};border:1px solid ${spkColor(s)}55">${spkName(s)}</span>`).join("");
+    `<span class="spk rnbtn" data-spk="${s}" title="Click to rename" style="background:${spkColor(s)}22;color:${spkColor(s)};border:1px solid ${spkColor(s)}55">${escapeHtml(spkName(s))} <b class="rn">✎</b></span>`).join("");
+  document.querySelectorAll("#legend .spk").forEach(el => el.onclick = () => renameBadge(el, el.dataset.spk));
   const audio = $("audio");
   audio.src = `/media/${id}`; audio.classList.remove("hidden");
 
   $("segs").innerHTML = job.segments.map(s => `
     <div class="seg">
       <time onclick="seek(${s.start})">${fmtTime(s.start)}</time>
-      <span class="spk" style="background:${spkColor(s.speaker)}22;color:${spkColor(s.speaker)}">${spkName(s.speaker)}</span>
+      <span class="spk" style="background:${spkColor(s.speaker)}22;color:${spkColor(s.speaker)}">${escapeHtml(spkName(s.speaker))}</span>
       <span>${escapeHtml(s.text)}</span>
     </div>`).join("");
 
@@ -150,6 +157,39 @@ function render(id, job){
     await navigator.clipboard.writeText(text);
     $("copy").textContent = "✓ Copied"; setTimeout(()=>$("copy").textContent="⧉ Copy transcript", 1500);
   };
+}
+
+function renameBadge(el, spk){
+  if (el.querySelector("input") || !curJob) return;
+  let done = false;
+  const restore = () => { if (!done) { done = true; render(curId, curJob); } };
+  el.innerHTML = `<input class="rnin" value="">`;
+  el.onclick = null;
+  const inp = el.querySelector("input");
+  inp.value = spkName(spk);
+  inp.focus(); inp.select();
+  inp.onkeydown = ev => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") { inp.onblur = null; done = false; commit(inp.value); }
+    else if (ev.key === "Escape") restore();
+  };
+  inp.onblur = () => setTimeout(() => { if (!done) restore(); }, 120);
+  async function commit(val){
+    try {
+      const r = await fetch(`/api/jobs/${curId}/rename`, {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify({speaker: spk, label: val}),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ("HTTP " + r.status));
+      const j = await r.json();
+      curJob.labels = j.labels;
+    } catch (e) {
+      showStatus(`Rename failed: ${e.message}`, true);
+      setTimeout(hideStatus, 2500);
+    }
+    done = true; render(curId, curJob);
+  }
 }
 
 function drawTimeline(job){

@@ -73,10 +73,17 @@ def fmt_ts(t: float, sep: str = ",") -> str:
     return f"{h:02d}:{m:02d}:{int(s):02d}{sep}{int((s % 1) * 1000):03d}"
 
 
+def spk_display(job: dict, speaker) -> str:
+    lab = (job.get("labels") or {}).get(str(speaker))
+    if lab:
+        return lab
+    return re.sub(r"^(?:speaker|spk)[_ ]", "Speaker ", str(speaker))
+
+
 def render_exports(job: dict) -> dict[str, str]:
     segs = job["segments"]
     name = job["name"]
-    def spk_name(s): return re.sub(r"^(?:speaker|spk)[_ ]", "Speaker ", str(s))
+    def spk_name(s): return spk_display(job, s)
 
     txt = "\n".join(
         f"[{fmt_ts(s['start'], '.')} {spk_name(s['speaker'])}] {s['text']}" for s in segs
@@ -94,10 +101,56 @@ def render_exports(job: dict) -> dict[str, str]:
     return {
         "txt": txt,
         "md": "\n".join(md),
-        "json": json.dumps(segs, ensure_ascii=False, indent=1),
+        "json": json.dumps(
+            [{**s, "speaker_name": spk_display(job, s["speaker"])} for s in segs],
+            ensure_ascii=False, indent=1,
+        ),
         "srt": "\n".join(srt),
         "vtt": "\n".join(vtt),
     }
+
+
+def _result_path(job_id: str) -> Path:
+    return RESULTS_DIR / f"{job_id}.json"
+
+
+def _save_result(job: dict) -> None:
+    _result_path(job["id"]).write_text(
+        json.dumps({"name": job.get("name"), "segments": job["segments"], "labels": job.get("labels") or {}}, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+
+
+def _lookup_job(job_id: str) -> dict | None:
+    """In-memory job; rehydrate a finished one from disk after a server restart."""
+    job = jobs.get(job_id)
+    if job is not None:
+        return job
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+        return None
+    p = _result_path(job_id)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    segs = data["segments"] if isinstance(data, dict) else data
+    labels = data.get("labels", {}) if isinstance(data, dict) else {}
+    if not isinstance(segs, list):
+        return None
+    name = data.get("name") if isinstance(data, dict) else None
+    if not name:
+        src = [q for q in UPLOAD_DIR.glob(f"{job_id}.*") if not q.name.endswith(".16k.wav")]
+        name = src[0].name[len(job_id) + 1:] if src else f"{job_id}.audio"
+    job = {
+        "id": job_id, "name": name, "status": "done", "stage": None, "error": None,
+        "elapsed": None, "segments": segs, "labels": labels,
+        "duration": round(max((s.get("end", 0.0) for s in segs), default=0.0), 1),
+        "speakers": sorted({s.get("speaker", "speaker_0") for s in segs}),
+    }
+    jobs[job_id] = job
+    return job
 
 
 def run_job(job_id: str, src_path: Path, device: str | None) -> None:
@@ -114,9 +167,7 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
         # drop empty texts
         segs = [s for s in segs if s["text"]]
         wav.unlink(missing_ok=True)
-        (RESULTS_DIR / f"{job_id}.json").write_text(
-            json.dumps(segs, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
+        job["labels"] = {}
         job.update(
             status="done",
             segments=segs,
@@ -125,6 +176,7 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
             speakers=sorted({s["speaker"] for s in segs}),
             stage=None,
         )
+        _save_result(job)
     except Exception as exc:
         traceback.print_exc()
         job.update(status="error", error=f"{type(exc).__name__}: {exc}", stage=None)
@@ -165,10 +217,10 @@ async def api_transcribe(request: Request):
 
 @app.get("/api/jobs/{job_id}")
 async def api_job(job_id: str):
-    job = jobs.get(job_id)
+    job = _lookup_job(job_id)
     if job is None:
         raise HTTPException(404, "Unknown job.")
-    keep = {k: job.get(k) for k in ("id", "name", "status", "stage", "error", "elapsed", "duration", "speakers")}
+    keep = {k: job.get(k) for k in ("id", "name", "status", "stage", "error", "elapsed", "duration", "speakers", "labels")}
     if job["status"] == "done":
         keep["segments"] = job["segments"]
     return keep
@@ -184,7 +236,7 @@ async def api_media(job_id: str):
 
 @app.get("/api/export/{job_id}")
 async def api_export(job_id: str, fmt: str = "txt"):
-    job = jobs.get(job_id)
+    job = _lookup_job(job_id)
     if job is None or job["status"] != "done":
         raise HTTPException(404, "Job not done.")
     exports = job.setdefault("exports", render_exports(job))
@@ -192,6 +244,31 @@ async def api_export(job_id: str, fmt: str = "txt"):
         raise HTTPException(400, f"fmt must be one of {sorted(exports)}")
     stem = re.sub(r"[^\w.\- ]+", "_", Path(job["name"]).stem)[:60]
     return _raw(exports[fmt].encode("utf-8"), f"{stem}.{fmt}")
+
+
+@app.post("/api/jobs/{job_id}/rename")
+async def api_rename(job_id: str, request: Request):
+    job = _lookup_job(job_id)
+    if job is None or job["status"] != "done":
+        raise HTTPException(404, "Job not done.")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body.")
+    speaker = str(body.get("speaker", ""))
+    label = re.sub(r"[\x00-\x1f\x7f]+", " ", str(body.get("label", "")))
+    label = re.sub(r"\s+", " ", label).strip()[:64]
+    if speaker not in (job.get("speakers") or []):
+        raise HTTPException(400, "Unknown speaker.")
+    with jobs_lock:
+        labels = job.setdefault("labels", {})
+        if label:
+            labels[speaker] = label
+        else:
+            labels.pop(speaker, None)
+        job.pop("exports", None)
+        _save_result(job)
+    return {"ok": True, "labels": job["labels"]}
 
 
 def _raw(payload: bytes, filename: str):
