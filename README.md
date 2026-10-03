@@ -58,6 +58,12 @@ legend to rename a speaker: names flow into the timeline, segment list, copy
 button and every download (txt/md/srt/vtt; JSON adds `speaker_name`).
 Clearing a name restores "Speaker N".
 
+Playback is linked across the page: a playhead line sweeps the colored
+speaker timeline, the transcript highlights the row being spoken and follows
+the audio. Clicking the timeline or any transcript row jumps the audio
+there; seeking the player re-centers the transcript. Scroll the transcript
+by hand to pause auto-follow — the next click or seek resumes it.
+
 Uploads are single-use: the uploaded file is deleted as soon as the audio
 conversion has consumed it, and only the small player transcode remains while
 the job's result is on screen; the upload directory is wiped on every server

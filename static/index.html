@@ -24,7 +24,7 @@
   button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 12px;cursor:pointer;font-size:13px}
   button:hover{border-color:var(--accent)}
   .spk{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:1px 8px;white-space:nowrap}
-  #timeline{width:100%;height:110px;display:block;border-radius:8px;background:var(--panel2);margin-top:10px}
+  #timeline{width:100%;height:110px;display:block;border-radius:8px;background:var(--panel2)}
   #audio{width:100%;margin-top:10px}
   .seg{display:grid;grid-template-columns:64px 92px 1fr;gap:10px;align-items:baseline;padding:7px 4px;border-bottom:1px solid var(--line)}
   .seg:last-child{border-bottom:none}
@@ -41,6 +41,10 @@
   .spk.rnbtn .rn{opacity:.55;font-weight:700;margin-left:2px}
   .spk.rnbtn:hover .rn{opacity:1}
   .rnin{width:120px;background:var(--bg);color:var(--fg);border:1px solid var(--accent);border-radius:6px;padding:0 6px;font:inherit;font-size:12px;outline:none}
+  .tlwrap{position:relative;margin-top:10px}
+  .ph{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.75);pointer-events:none;z-index:2;left:0}
+  .seg{cursor:pointer}
+  .seg.cur{background:#1f6feb2e;box-shadow:inset 3px 0 0 var(--accent)}
 </style>
 </head>
 <body>
@@ -59,7 +63,7 @@
       <span class="badge" id="rTime"></span>
     </div>
     <div class="legend" id="legend"></div>
-    <canvas id="timeline" width="940" height="110"></canvas>
+    <div class="tlwrap"><canvas id="timeline" width="940" height="110"></canvas><div id="ph" class="ph hidden"></div></div>
     <audio id="audio" controls class="hidden"></audio>
     <div class="toolbar">
       <button data-fmt="md">⬇ Markdown</button>
@@ -78,6 +82,7 @@ const $ = id => document.getElementById(id);
 const drop = $("drop"), fileIn = $("file");
 let poll = null;
 let curId = null, curJob = null;
+let follow = true, lastIdx = -1;
 
 drop.onclick = () => fileIn.click();
 fileIn.onchange = () => { uploadAll(fileIn.files); fileIn.value=""; };
@@ -145,11 +150,13 @@ function render(id, job){
   else { audio.removeAttribute("src"); audio.classList.add("hidden"); }
 
   $("segs").innerHTML = job.segments.map(s => `
-    <div class="seg">
-      <time onclick="seek(${s.start})">${fmtTime(s.start)}</time>
+    <div class="seg" data-start="${s.start}">
+      <time>${fmtTime(s.start)}</time>
       <span class="spk" style="background:${spkColor(s.speaker)}22;color:${spkColor(s.speaker)}">${escapeHtml(spkName(s.speaker))}</span>
       <span>${escapeHtml(s.text)}</span>
     </div>`).join("");
+  document.querySelectorAll("#segs .seg").forEach(el => el.onclick = () => seekTo(parseFloat(el.dataset.start)));
+  follow = true; lastIdx = -1; onTick();
 
   drawTimeline(job);
   document.querySelectorAll(".toolbar [data-fmt]").forEach(b => b.onclick = () => location.href = `/api/export/${id}?fmt=${b.dataset.fmt}`);
@@ -209,10 +216,33 @@ function drawTimeline(job){
     ctx.fillStyle = "#8b98a5"; ctx.font = "11px system-ui";
     ctx.fillText(spkName(s), 2, y-2 > 10 ? y-2 : y+9);
   });
-  cv.onclick = ev => { const r=cv.getBoundingClientRect(); seek((ev.clientX-r.left)/r.width*dur); };
+  cv.onclick = ev => { const r=cv.getBoundingClientRect(); seekTo((ev.clientX-r.left)/r.width*dur); };
 }
 
-window.seek = t => { const a=$("audio"); if(a.src){ a.currentTime=Math.max(t,0); a.play(); } };
+function seekTo(t){ const a = $("audio"); if (!a.src) return; follow = true; a.currentTime = Math.max(t, 0); a.play(); onTick(); }
+
+function onTick(force){
+  if (!curJob) return;
+  const a = $("audio"), dur = Math.max(curJob.duration || 0, 1e-6), t = a.currentTime || 0;
+  const ph = $("ph");
+  const shown = a.src !== "" && !a.classList.contains("hidden");
+  ph.classList.toggle("hidden", !shown);
+  if (shown) ph.style.left = Math.min(100, t / dur * 100) + "%";
+  const segs = curJob.segments;
+  let lo = 0, hi = segs.length - 1, i = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (segs[m].start <= t + 0.05) { i = m; lo = m + 1; } else hi = m - 1; }
+  const rows = document.querySelectorAll("#segs .seg");
+  for (let j = 0; j < rows.length; j++) rows[j].classList.toggle("cur", j === i);
+  if (follow && i >= 0 && (i !== lastIdx || force) && rows[i]) {
+    const r = rows[i].getBoundingClientRect();
+    if (r.top < 60 || r.bottom > innerHeight - 40) rows[i].scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  lastIdx = i;
+}
+
+$("audio").addEventListener("timeupdate", () => onTick());
+$("audio").addEventListener("seeked", () => { follow = true; onTick(true); });
+["wheel", "touchmove"].forEach(ev => window.addEventListener(ev, () => { follow = false; }, { passive: true }));
 
 function escapeHtml(x){ return x.replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function showStatus(msg, isErr){ const s=$("status"); s.classList.remove("hidden"); s.querySelector(".spin").style.display=isErr?"none":""; s.children[1].innerHTML=(isErr?'<span class="err">':'')+msg+(isErr?'</span>':''); }
