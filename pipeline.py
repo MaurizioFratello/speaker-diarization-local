@@ -255,7 +255,7 @@ class Transcriber:
         self.device = map_location
 
     @torch.inference_mode()
-    def transcribe(self, wav_path: str | os.PathLike) -> list[dict]:
+    def transcribe(self, wav_path: str | os.PathLike, publish=None) -> list[dict]:
         wav_path = os.fspath(wav_path)
         if _is_silent_wav(wav_path):
             return []
@@ -279,6 +279,8 @@ class Transcriber:
         diar_right_offset = (
             0 if cfg.spk_supervision == "rttm" else cfg.diar_right_context * self.diar_model.encoder.subsampling_factor
         )
+        import time as _time
+        last_pub = 0.0
         for step_num, (chunk_audio, chunk_lengths, diar_chunk_audio, diar_chunk_lengths) in enumerate(
             buffer.iter_with_right_context(diar_right_offset)
         ):
@@ -301,6 +303,22 @@ class Transcriber:
                     is_buffer_empty=buffer.is_buffer_empty(),
                     drop_extra_pre_encoded=drop_extra_pre_encoded,
                 )
+            if publish is not None and _time.monotonic() - last_pub >= 0.5:
+                last_pub = _time.monotonic()
+                try:
+                    # Non-mutating snapshot: seglsts is rebuilt per step from the
+                    # speaker-wise sentence lists; copy each dict so the next step's
+                    # _update_last_sentence can never tear a published row.
+                    partial = [
+                        self._normalize(dict(s))
+                        for st in streamer.instance_manager.batch_asr_states
+                        for s in st.seglsts
+                        if (s.get("words") or "").strip()
+                    ]
+                    partial.sort(key=lambda x: x["start"])
+                    publish(step_num, partial)
+                except Exception:
+                    pass  # progress must never sink the run
 
         seglsts = streamer.generate_seglst_dicts_from_parallel_streaming(samples=samples)
         return [self._normalize(seg) for seg in seglsts]

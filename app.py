@@ -16,6 +16,7 @@ import shutil
 import threading
 import time
 import traceback
+import wave
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -212,11 +213,21 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
         # the uploaded file is single-use: consumed by the conversion
         src_path.unlink(missing_ok=True)
         _check_shutdown()
+        with wave.open(str(wav)) as _w:
+            job["duration"] = round(_w.getnframes() / _w.getframerate(), 1)
         job["stage"] = "loading-models"
         tr = get_transcriber(device)
         _check_shutdown()
         job["stage"] = "transcribing"
-        segs = tr.transcribe(wav)
+        total = job["duration"] or 1.0
+
+        def _publish(step, partial):
+            job["step"] = step
+            job["partial"] = partial
+            job["partial_speakers"] = sorted({p["speaker"] for p in partial})
+            job["progress"] = min(1.0, round(max((p["end"] for p in partial), default=0.0) / total, 3))
+
+        segs = tr.transcribe(wav, publish=_publish)
         _check_shutdown()
         # drop empty texts
         segs = [s for s in segs if s["text"]]
@@ -228,6 +239,7 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
             duration=round(max((s["end"] for s in segs), default=0.0), 1),
             speakers=sorted({s["speaker"] for s in segs}),
             stage=None,
+            partial=None, partial_speakers=None, progress=None, step=None,
         )
         _save_result(job)
         _sweep_uploads(wav)
@@ -235,7 +247,7 @@ def run_job(job_id: str, src_path: Path, device: str | None) -> None:
         traceback.print_exc()
         wav.unlink(missing_ok=True)
         src_path.unlink(missing_ok=True)
-        job.update(status="error", error=f"{type(exc).__name__}: {exc}", stage=None)
+        job.update(status="error", error=f"{type(exc).__name__}: {exc}", stage=None, partial=None)
 
 
 # --------------------------------------------------------------------------- routes
@@ -277,11 +289,16 @@ async def api_job(job_id: str):
     if job is None:
         raise HTTPException(404, "Unknown job.")
     keep = {k: job.get(k) for k in ("id", "name", "status", "stage", "error", "elapsed", "duration", "speakers", "labels")}
+    keep["has_media"] = (UPLOAD_DIR / f"{job_id}.16k.wav").is_file() or any(
+        UPLOAD_DIR.glob(f"{job_id}.*")
+    )
+    keep["progress"] = job.get("progress")
     if job["status"] == "done":
         keep["segments"] = job["segments"]
-        keep["has_media"] = (UPLOAD_DIR / f"{job_id}.16k.wav").is_file() or any(
-            UPLOAD_DIR.glob(f"{job_id}.*")
-        )
+    elif job.get("partial") is not None:
+        keep["segments"] = job["partial"]
+        keep["speakers"] = job.get("partial_speakers") or []
+        keep["partial"] = True
     return keep
 
 @app.get("/media/{job_id}")

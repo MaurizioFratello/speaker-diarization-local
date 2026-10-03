@@ -51,7 +51,8 @@ Then open **http://127.0.0.1:8765** and drop files.
 Supported inputs: WAV, MP3, M4A, FLAC, OGG/Opus, AAC, WMA, AMR, AIFF, and
 video containers (MP4, MKV, MOV, WEBM) — the audio track is extracted locally.
 
-Finished jobs get an in-browser player. It streams the internal 16 kHz
+Jobs get a browser player as soon as the audio is converted — even while
+transcription is still running. It streams the internal 16 kHz
 transcode (never the uploaded container), so playback works for every input
 format regardless of browser codec support. Click a speaker badge (✎) in the
 legend to rename a speaker: names flow into the timeline, segment list, copy
@@ -65,6 +66,13 @@ legend, timeline and download buttons stay pinned at the top. Clicking the
 timeline or any transcript row jumps the audio there; seeking the player
 re-centers the transcript panel. Scroll the transcript by hand to pause
 auto-follow — the next click or seek resumes it.
+
+While the GPU works, the transcript, timeline, speaker badges and a
+progress bar update live ("Transcribing… 34 % (21:04 / 62:04)" — the
+percentage is how far into the audio the text has reached, published from
+non-mutating snapshots of the streaming decoder between chunks). Downloads,
+copy and speaker renaming stay disabled until the job finishes; playback in
+the meantime is fully available.
 
 Uploads are single-use: the uploaded file is deleted as soon as the audio
 conversion has consumed it, and only the small player transcode remains while

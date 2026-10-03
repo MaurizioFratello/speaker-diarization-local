@@ -47,6 +47,7 @@
   .seg.cur{background:#1f6feb2e;box-shadow:inset 3px 0 0 var(--accent)}
   .ctl{position:sticky;top:0;z-index:3;background:var(--panel);padding-bottom:8px}
   #segs{max-height:60vh;overflow-y:auto;scrollbar-width:thin}
+  .pbar{height:3px;background:var(--accent);border-radius:2px;margin-top:4px;width:0;transition:width .4s}
 </style>
 </head>
 <body>
@@ -67,6 +68,7 @@
     </div>
     <div class="legend" id="legend"></div>
     <div class="tlwrap"><canvas id="timeline" width="940" height="110"></canvas><div id="ph" class="ph hidden"></div></div>
+    <div id="pbar" class="pbar hidden"></div>
     <audio id="audio" controls class="hidden"></audio>
     <div class="toolbar">
       <button data-fmt="md">⬇ Markdown</button>
@@ -125,7 +127,13 @@ function pollJob(id, name){
     if (!resp.ok) { clearInterval(poll); showStatus(`${name} — ${j.detail || ("HTTP " + resp.status)}`, true); return; }
     if (j.status === "queued" || j.status === "running" || !j.status) {
       const secs = Math.round((Date.now()-t0)/1000);
-      showStatus(`${name} — ${STAGES[j.stage] || "Processing…"} (${secs}s)`);
+      if (j.segments && j.segments.length) {
+        render(id, j);
+        const pct = Math.round((j.progress || 0) * 100);
+        showStatus(`${name} — Transcribing… ${pct}% (${fmtTime((j.progress||0)*(j.duration||0))} / ${fmtTime(j.duration||0)}) — ${secs}s elapsed`);
+      } else {
+        showStatus(`${name} — ${STAGES[j.stage] || "Processing…"} (${secs}s)`);
+      }
     } else if (j.status === "error") {
       clearInterval(poll);
       showStatus(`${name} — Error: ${j.error}`, true);
@@ -140,29 +148,43 @@ function spkName(s){ const l = curJob && (curJob.labels || {})[s]; if (l) return
 function fmtTime(t){ const m=Math.floor(t/60), s=(t%60); return `${m}:${s.toFixed(1).padStart(4,"0")}`; }
 
 function render(id, job){
+  const isNew = curId !== id;
+  const isPartial = !!job.partial;
   curId = id; curJob = job;
   $("result").classList.remove("hidden");
   $("rName").textContent = job.name;
-  $("rDur").textContent = `⏱ ${fmtTime(job.duration)} audio`;
+  $("rDur").textContent = `⏱ ${fmtTime(job.duration || 0)} audio`;
   $("rSpk").textContent = `👤 ${job.speakers.length} speaker${job.speakers.length===1?"":"s"}`;
-  $("rTime").textContent = `⚙ ${job.elapsed ?? "?"}s processing`;
+  $("rTime").textContent = isPartial ? `⚙ transcribing… ${Math.round((job.progress||0)*100)}%` : `⚙ ${job.elapsed ?? "?"}s processing`;
+  const pb = $("pbar");
+  if (isPartial) { pb.classList.remove("hidden"); pb.style.width = Math.round((job.progress||0)*100) + "%"; }
+  else pb.classList.add("hidden");
   $("legend").innerHTML = job.speakers.map(s =>
-    `<span class="spk rnbtn" data-spk="${s}" title="Click to rename" style="background:${spkColor(s)}22;color:${spkColor(s)};border:1px solid ${spkColor(s)}55">${escapeHtml(spkName(s))} <b class="rn">✎</b></span>`).join("");
-  document.querySelectorAll("#legend .spk").forEach(el => el.onclick = () => renameBadge(el, el.dataset.spk));
+    `<span class="spk rnbtn" data-spk="${s}" title="Click to rename" style="background:${spkColor(s)}22;color:${spkColor(s)};border:1px solid ${spkColor(s)}55">${escapeHtml(spkName(s))}${isPartial ? "" : ` <b class="rn">✎</b>`}</span>`).join("");
+  if (!isPartial) document.querySelectorAll("#legend .spk").forEach(el => el.onclick = () => renameBadge(el, el.dataset.spk));
   const audio = $("audio");
-  if (job.has_media) { audio.src = `/media/${id}`; audio.classList.remove("hidden"); }
-  else { audio.removeAttribute("src"); audio.classList.add("hidden"); }
-
-  $("segs").innerHTML = job.segments.map(s => `
-    <div class="seg" data-start="${s.start}">
-      <time>${fmtTime(s.start)}</time>
-      <span class="spk" style="background:${spkColor(s.speaker)}22;color:${spkColor(s.speaker)}">${escapeHtml(spkName(s.speaker))}</span>
-      <span>${escapeHtml(s.text)}</span>
-    </div>`).join("");
-  document.querySelectorAll("#segs .seg").forEach(el => el.onclick = () => seekTo(parseFloat(el.dataset.start)));
-  follow = true; lastIdx = -1; $("segs").scrollTop = 0; onTick();
-
+  if (job.has_media && !audio.src) audio.src = `/media/${id}`;
+  audio.classList.toggle("hidden", !(job.has_media && audio.src));
+  const box = $("segs");
+  const lastS = job.segments[job.segments.length - 1];
+  const sig = job.segments.length + "|" + (lastS ? lastS.speaker + ":" + lastS.start + ":" + lastS.end : "");
+  if (!isPartial || isNew || box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.innerHTML = job.segments.map(s => `
+      <div class="seg" data-start="${s.start}">
+        <time>${fmtTime(s.start)}</time>
+        <span class="spk" style="background:${spkColor(s.speaker)}22;color:${spkColor(s.speaker)}">${escapeHtml(spkName(s.speaker))}</span>
+        <span>${escapeHtml(s.text)}</span>
+      </div>`).join("");
+    box.querySelectorAll(".seg").forEach(el => el.onclick = () => seekTo(parseFloat(el.dataset.start)));
+  }
+  if (isNew || !isPartial) { follow = true; lastIdx = -1; }
+  if (isNew) box.scrollTop = 0;
+  onTick();
   drawTimeline(job);
+  const tb = document.querySelector(".toolbar");
+  tb.style.opacity = isPartial ? ".45" : "";
+  tb.style.pointerEvents = isPartial ? "none" : "";
   document.querySelectorAll(".toolbar [data-fmt]").forEach(b => b.onclick = () => location.href = `/api/export/${id}?fmt=${b.dataset.fmt}`);
   $("copy").onclick = async () => {
     const text = job.segments.map(s => `[${fmtTime(s.start)}] ${spkName(s.speaker)}: ${s.text}`).join("\n");
