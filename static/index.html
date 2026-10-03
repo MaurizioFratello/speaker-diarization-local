@@ -17,7 +17,16 @@
   #drop{border:2px dashed var(--line);border-radius:14px;padding:42px 20px;text-align:center;color:var(--dim);cursor:pointer;transition:.15s;background:var(--panel)}
   #drop.hot{border-color:var(--accent);color:var(--fg);background:var(--panel2)}
   #drop b{color:var(--fg)}
-  #drop.locked{opacity:.45;cursor:progress;border-style:solid;border-color:var(--accent)}
+  #drop.locked{opacity:.75;border-style:solid;border-color:var(--accent)}
+  .toggles{display:flex;flex-wrap:wrap;gap:10px 26px;margin:10px 2px 16px}
+  .tgl{display:flex;align-items:flex-start;gap:10px;cursor:pointer;color:var(--fg);font-size:13px;flex:1 1 280px;line-height:1.35}
+  .tgl input{display:none}
+  .tgl .trk{flex:none;width:36px;height:20px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);position:relative;transition:.15s;margin-top:1px}
+  .tgl .trk::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--dim);transition:.15s}
+  .tgl input:checked + .trk{background:var(--accent);border-color:var(--accent)}
+  .tgl input:checked + .trk::after{left:18px;background:#fff}
+  .tgl b{font-weight:600}
+  .tgl i{display:block;color:var(--dim);font-style:normal;font-size:11.5px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:18px;padding:16px}
   .meta{display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--dim);font-size:13px;align-items:baseline}
   .meta .name{color:var(--fg);font-weight:600;font-size:15px}
@@ -55,6 +64,9 @@
 <div class="wrap">
   <h1>🎙️ Speaker Transcript <span class="sub">local GPU · Nemotron-3-Diarization + Nemotron-3.5-ASR</span></h1>
   <div id="drop">Drop audio / video files here, or click to choose.<br><b>WAV · MP3 · M4A · FLAC · OGG · OPUS · MP4 · MKV · MOV · WEBM</b></div>
+  <div class="toggles">
+    <label class="tgl"><input type="checkbox" id="vadFull"><span class="trk"></span><span><b>⚡ Skip silence</b><i>Also drops long gaps <u>inside</u> the recording — 2–3× faster; timeline, player and exports keep the original file &amp; timestamps</i></span></label>
+  </div>
   <input id="file" type="file" class="hidden" accept="audio/*,video/*,.wav,.mp3,.m4a,.flac,.ogg,.opus,.mp4,.mkv,.mov,.webm,.aac,.wma,.amr,.aiff" multiple>
 
   <div id="status" class="status hidden"><div class="spin"></div><span id="statusText"></span></div>
@@ -87,19 +99,27 @@
 const COLORS = ["#4cc2ff","#f78166","#3fb950","#d2a8ff","#f2cc60","#ff7b9c","#2ee6d6","#b3db70"];
 const $ = id => document.getElementById(id);
 const drop = $("drop"), fileIn = $("file");
-let poll = null;
+const polls = {};
 let curId = null, curJob = null;
 let follow = true, lastIdx = -1;
-let running = false;
+let active = 0, lastSubmit = null;
 const dropHTML = drop.innerHTML;
+const vf = $("vadFull");
+function syncToggles(){
+  localStorage.setItem("vadFull", vf.checked ? "1" : "0");
+}
+vf.checked = localStorage.getItem("vadFull") === "1";
+vf.onchange = syncToggles;
+syncToggles();
 function setLock(on){
-  running = on;
-  drop.classList.toggle("locked", on);
-  drop.innerHTML = on ? "⏳ Transcribing… the drop zone unlocks when it finishes." : dropHTML;
-  fileIn.disabled = on;
+  active = Math.max(0, active + (on ? 1 : -1));
+  drop.classList.toggle("locked", active > 0);
+  drop.innerHTML = active > 0
+    ? `⏳ Transcribing ${active} file${active > 1 ? "s" : ""}… drop the next one anytime — it will be queued.`
+    : dropHTML;
 }
 
-drop.onclick = () => { if (running) { showStatus("Transcription in progress — drop the next file once it finishes.", true); return; } fileIn.click(); };
+drop.onclick = () => fileIn.click();
 fileIn.onchange = () => { uploadAll(fileIn.files); fileIn.value=""; };
 ["dragover","dragenter"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("hot"); }));
 ["dragleave","drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("hot"); }));
@@ -110,7 +130,6 @@ window.addEventListener("dragenter", ev => ev.preventDefault());
 window.addEventListener("drop", ev => ev.preventDefault());
 
 async function uploadAll(files){
-  if (running) { showStatus("Transcription in progress — drop the next file once it finishes.", true); return; }
   if (files.length > 1) { showStatus(`Please drop files one at a time (${files.length} selected).`, true); return; }
   for (const f of files) {
     if (!validate(f)) continue;
@@ -118,10 +137,13 @@ async function uploadAll(files){
     showStatus(`Uploading ${f.name} …`);
     const fd = new FormData();
     fd.append("file", f, f.name);
+    if (vf.checked) fd.append("vad_full", "1");
     try {
       const r = await fetch("/api/transcribe", {method:"POST", body:fd});
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
-      pollJob((await r.json()).job_id, f.name);
+      const j0 = await r.json();
+      lastSubmit = j0.job_id;
+      pollJob(j0.job_id, f.name);
     } catch(e){ setLock(false); showStatus(`Failed: ${e.message}`, true); }
   }
 }
@@ -134,16 +156,19 @@ function validate(f){
 
 const STAGES = {queued:"Queued…", converting:"Converting audio…", "loading-models":"Loading models (first run downloads weights)…", transcribing:"Transcribing on GPU…"};
 function pollJob(id, name){
-  if (poll) clearInterval(poll);
+  if (polls[id]) clearInterval(polls[id]);
   let t0 = Date.now();
-  poll = setInterval(async () => {
+  polls[id] = setInterval(async () => {
     let resp, j;
     try { resp = await fetch(`/api/jobs/${id}`); j = await resp.json(); }
     catch(e){ return; }
-    if (!resp.ok) { clearInterval(poll); setLock(false); showStatus(`${name} — ${j.detail || ("HTTP " + resp.status)}`, true); return; }
+    if (!resp.ok) { clearInterval(polls[id]); delete polls[id]; setLock(false); showStatus(`${name} — ${j.detail || ("HTTP " + resp.status)}`, true); return; }
+    const mine = (id === curId || id === lastSubmit);
     if (j.status === "queued" || j.status === "running" || !j.status) {
       const secs = Math.round((Date.now()-t0)/1000);
-      if (j.segments && j.segments.length) {
+      if (!mine) { /* background job: don't steal the status line */ }
+      else if (j.queue_pos != null) { showStatus(`${name} — queued, position ${j.queue_pos + 1} in line (${secs}s)`); }
+      else if (j.segments && j.segments.length) {
         render(id, j);
         const pct = Math.round((j.progress || 0) * 100);
         showStatus(`${name} — Transcribing… ${pct}% (${fmtTime((j.progress||0)*(j.duration||0))} / ${fmtTime(j.duration||0)}) — ${secs}s elapsed`);
@@ -151,10 +176,18 @@ function pollJob(id, name){
         showStatus(`${name} — ${STAGES[j.stage] || "Processing…"} (${secs}s)`);
       }
     } else if (j.status === "error") {
-      clearInterval(poll); setLock(false);
+      clearInterval(polls[id]); delete polls[id]; setLock(false);
       showStatus(`${name} — Error: ${j.error}`, true);
     } else if (j.status === "done") {
-      clearInterval(poll); hideStatus(); setLock(false); render(id, j);
+      clearInterval(polls[id]); delete polls[id];
+      const wasLast = active <= 1;
+      setLock(false);
+      if (id === curId || id === lastSubmit) {
+        if (wasLast) hideStatus();
+        render(id, j);
+      } else {
+        showStatus(`${name} — done ✔`, false);
+      }
     }
   }, 1000);
 }
@@ -168,7 +201,7 @@ function render(id, job){
   const isPartial = !!job.partial;
   curId = id; curJob = job;
   $("result").classList.remove("hidden");
-  $("rName").textContent = job.name;
+  $("rName").textContent = job.name + (job.vad_full ? "  ⚡" : "");
   $("rDur").textContent = `⏱ ${fmtTime(job.duration || 0)} audio`;
   $("rSpk").textContent = `👤 ${job.speakers.length} speaker${job.speakers.length===1?"":"s"}`;
   $("rTime").textContent = isPartial ? `⚙ transcribing… ${Math.round((job.progress||0)*100)}%` : `⚙ ${job.elapsed ?? "?"}s processing`;
