@@ -59,10 +59,12 @@ button and every download (txt/md/srt/vtt; JSON adds `speaker_name`).
 Clearing a name restores "Speaker N".
 
 Playback is linked across the page: a playhead line sweeps the colored
-speaker timeline, the transcript highlights the row being spoken and follows
-the audio. Clicking the timeline or any transcript row jumps the audio
-there; seeking the player re-centers the transcript. Scroll the transcript
-by hand to pause auto-follow — the next click or seek resumes it.
+speaker timeline, and the transcript — rendered in its own scrollable panel —
+highlights and auto-scrolls to the row being spoken while the player,
+legend, timeline and download buttons stay pinned at the top. Clicking the
+timeline or any transcript row jumps the audio there; seeking the player
+re-centers the transcript panel. Scroll the transcript by hand to pause
+auto-follow — the next click or seek resumes it.
 
 Uploads are single-use: the uploaded file is deleted as soon as the audio
 conversion has consumed it, and only the small player transcode remains while

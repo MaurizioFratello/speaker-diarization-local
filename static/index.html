@@ -45,6 +45,8 @@
   .ph{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.75);pointer-events:none;z-index:2;left:0}
   .seg{cursor:pointer}
   .seg.cur{background:#1f6feb2e;box-shadow:inset 3px 0 0 var(--accent)}
+  .ctl{position:sticky;top:0;z-index:3;background:var(--panel);padding-bottom:8px}
+  #segs{max-height:60vh;overflow-y:auto;scrollbar-width:thin}
 </style>
 </head>
 <body>
@@ -56,7 +58,8 @@
   <div id="status" class="status hidden"><div class="spin"></div><span id="statusText"></span></div>
 
   <div id="result" class="card hidden">
-    <div class="meta">
+    <div class="ctl">
+      <div class="meta">
       <span class="name" id="rName"></span>
       <span class="badge" id="rDur"></span>
       <span class="badge" id="rSpk"></span>
@@ -72,6 +75,7 @@
       <button data-fmt="srt">⬇ SRT</button>
       <button data-fmt="vtt">⬇ VTT</button>
       <button id="copy">⧉ Copy transcript</button>
+    </div>
     </div>
     <div id="segs"></div>
   </div>
@@ -156,7 +160,7 @@ function render(id, job){
       <span>${escapeHtml(s.text)}</span>
     </div>`).join("");
   document.querySelectorAll("#segs .seg").forEach(el => el.onclick = () => seekTo(parseFloat(el.dataset.start)));
-  follow = true; lastIdx = -1; onTick();
+  follow = true; lastIdx = -1; $("segs").scrollTop = 0; onTick();
 
   drawTimeline(job);
   document.querySelectorAll(".toolbar [data-fmt]").forEach(b => b.onclick = () => location.href = `/api/export/${id}?fmt=${b.dataset.fmt}`);
@@ -234,15 +238,16 @@ function onTick(force){
   const rows = document.querySelectorAll("#segs .seg");
   for (let j = 0; j < rows.length; j++) rows[j].classList.toggle("cur", j === i);
   if (follow && i >= 0 && (i !== lastIdx || force) && rows[i]) {
-    const r = rows[i].getBoundingClientRect();
-    if (r.top < 60 || r.bottom > innerHeight - 40) rows[i].scrollIntoView({ block: "center", behavior: "smooth" });
+    const box = $("segs"), br = box.getBoundingClientRect(), r = rows[i].getBoundingClientRect();
+    if (r.top < br.top + 8 || r.bottom > br.bottom - 8)
+      box.scrollTo({ top: box.scrollTop + (r.top - br.top) - (box.clientHeight - r.height) / 2, behavior: "smooth" });
   }
   lastIdx = i;
 }
 
 $("audio").addEventListener("timeupdate", () => onTick());
 $("audio").addEventListener("seeked", () => { follow = true; onTick(true); });
-["wheel", "touchmove"].forEach(ev => window.addEventListener(ev, () => { follow = false; }, { passive: true }));
+["wheel", "touchmove"].forEach(ev => $("segs").addEventListener(ev, () => { follow = false; }, { passive: true }));
 
 function escapeHtml(x){ return x.replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function showStatus(msg, isErr){ const s=$("status"); s.classList.remove("hidden"); s.querySelector(".spin").style.display=isErr?"none":""; s.children[1].innerHTML=(isErr?'<span class="err">':'')+msg+(isErr?'</span>':''); }
