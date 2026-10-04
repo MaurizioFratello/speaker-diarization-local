@@ -18,6 +18,7 @@ import time
 import traceback
 import wave
 import uuid
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -511,12 +512,44 @@ async def index():
     return HTMLResponse(html.read_text(encoding="utf-8"))
 
 
+def _open_browser_when_ready(
+    url: str, server: "uvicorn.Server", wait_models: bool, timeout: float = 900.0
+) -> None:
+    """Open the UI in the default browser once the server is listening -- and,
+    when models are being preloaded, once they are actually loaded (or the
+    load failed, so the user sees the error banner instead of a dead page).
+    """
+    deadline = time.monotonic() + timeout
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if wait_models:
+        while (
+            not model_ready_event.is_set()
+            and not transcriber_error
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.25)
+    if time.monotonic() >= deadline:
+        print(f"[app] browser launch skipped: startup unconfirmed after {timeout:.0f}s", flush=True)
+        return
+    try:
+        if webbrowser.open_new(url):
+            print(f"[app] opened {url} in your browser", flush=True)
+        else:
+            print(f"[app] no browser available - open {url} manually", flush=True)
+    except Exception as exc:
+        print(f"[app] browser launch failed ({exc}) - open {url} manually", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Speaker transcription web app")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--device", default=None, help="cuda (default) or cpu")
     ap.add_argument("--preload", action="store_true", help="load models at startup")
+    ap.add_argument("--open-browser", action="store_true",
+                    help="open the UI in the default browser once startup (and --preload "
+                         "model loading) is finished")
     ap.add_argument("--no-vad-trim", action="store_true",
                     help="disable Silero VAD trimming of leading/trailing silence")
     args = ap.parse_args()
@@ -530,7 +563,20 @@ def main() -> None:
     if args.preload:
         threading.Thread(target=lambda: get_transcriber(args.device), daemon=True).start()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(config)
+
+    browser_host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
+    url = f"http://{browser_host}:{args.port}"
+    if args.open_browser:
+        threading.Thread(
+            target=_open_browser_when_ready,
+            args=(url, server, args.preload),
+            daemon=True,
+        ).start()
+    print(f"[app] speaker transcript app on {url}", flush=True)
+
+    server.run()
 
 
 if __name__ == "__main__":

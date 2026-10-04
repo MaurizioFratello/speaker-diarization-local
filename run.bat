@@ -5,5 +5,5 @@ if not exist .venv (
   exit /b 1
 )
 set PYTHONUTF8=1
-.venv\Scripts\python.exe app.py --preload
+.venv\Scripts\python.exe app.py --preload --open-browser
 pause

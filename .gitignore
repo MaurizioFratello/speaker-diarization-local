@@ -7,3 +7,8 @@ data/results/
 __pycache__/
 *.pyc
 *.16k.wav
+
+# Runtime artifacts
+*.log
+.app.pid
+bench_*

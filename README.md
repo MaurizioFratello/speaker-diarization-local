@@ -46,7 +46,7 @@ otherwise they are fetched once from the Hugging Face Hub and cached.
 .\run.bat     # starts the app and preloads models
 ```
 
-Then open **http://127.0.0.1:8765** and drop files.
+The launcher opens **http://127.0.0.1:8765** in your default browser once the server and preloaded models are ready. If it cannot open a browser, navigate there manually and drop files.
 
 Supported inputs: WAV, MP3, M4A, FLAC, OGG/Opus, AAC, WMA, AMR, AIFF, and
 video containers (MP4, MKV, MOV, WEBM) — the audio track is extracted locally.
@@ -87,7 +87,7 @@ still work after restarts.
 ## Options
 
 ```
-python app.py --port 8765 --host 127.0.0.1 --device cuda|cpu --preload
+python app.py --port 8765 --host 127.0.0.1 --device cuda|cpu --preload --open-browser
 ```
 
 
