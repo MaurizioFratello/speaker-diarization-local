@@ -124,7 +124,7 @@ def get_transcriber(device: str | None) -> Transcriber:
 
 # --------------------------------------------------------------------------- jobs
 
-from exports import render_exports, spk_display
+from exports import render_exports
 def _result_path(job_id: str) -> Path:
     return RESULTS_DIR / f"{job_id}.json"
 
