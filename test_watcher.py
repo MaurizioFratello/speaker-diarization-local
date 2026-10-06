@@ -168,7 +168,12 @@ check("poison.wav" in plan_with({digest: {"name": "poison.wav", "path": str(A), 
                                          "env_strikes": 6}}, [A]),
       "a pending file after the strike cap is retried on the next tick")
 done_e = {digest: {"name": "poison.wav", "path": str(A), "status": "done", "result": str(B), "formats": {}}}
+sideA = A.with_name(A.stem + ".transcript.md")
+sideA.write_text("# Transcript — poison.wav\n\n**Speaker 0** `x`\n", encoding="utf-8")
 check(plan_with(done_e, [A]) == [], "an already-transcribed file is skipped")
+sideA.unlink()
+check("poison.wav" in plan_with(done_e, [A]),
+      "but with the transcript gone from the folder it is work again (folder = ground truth)")
 
 print("5) identical bytes in the same tick are transcribed once, for all names")
 E1 = TMP / "same_content_a.wav"; E2 = TMP / "same_content_b.wav"
@@ -221,12 +226,18 @@ st8 = watcher.Store(TMP / "s8.json"); st8.data = {str(B): {"size": B.stat().st_s
 lg8 = watcher.Store(TMP / "l8.json"); lg8.data = {}     # ledger as if never flushed
 a8 = argparse.Namespace(**vars(args)); a8.limit = 0; a8.force = False; a8.only = None
 a8.min_age = 0; a8.ignore_open = True; a8.dry_run = False
+sideB = B.with_name(B.stem + ".transcript.md")
+from exports import render_exports as _re8
+sideB.write_text(_re8({"name": B.name, "segments": SEGS, "labels": {}})["md"], encoding="utf-8")
 todo8, _ = watcher.plan(TMP, a8, st8, lg8)
 check(B.name not in [t["name"] for t in todo8],
       "the existing canonical transcript is trusted; the file is not requeued")
 canon8.unlink()
+check(B.name not in [t["name"] for t in watcher.plan(TMP, a8, st8, lg8)[0]],
+      "canonical copy gone but the transcript is in the folder -> the folder is believed")
+sideB.unlink()
 check(B.name in [t["name"] for t in watcher.plan(TMP, a8, st8, lg8)[0]],
-      "without it the file is queued again (the marker really is what gates it)")
+      "neither canonical copy nor transcript -> it is queued as work again")
 
 print("8) SIGTERM (as systemd sends it) exits cleanly with bookkeeping intact")
 led9 = watcher.Store(TMP / "l9.json"); led9.data = {}
@@ -351,6 +362,69 @@ check(d == 2 and f == 0 and probe["i"] >= 3 and COUNT["init"] - before == 1,
 
 watcher.gpu_state = orig_state
 
+watcher.gpu_state = orig_state
+
+print("14b) the folder is the ground truth, and one recording cannot borrow "
+       "another's transcript")
+GR = TMP / "ground"; GR.mkdir(exist_ok=True)
+def mkwav(dirn, nm, payload):
+    fp = dirn / nm
+    with wave.open(str(fp), "wb") as wv:
+        wv.setnchannels(1); wv.setsampwidth(2); wv.setframerate(16000)
+        wv.writeframes(payload * 4000)
+    return fp
+r1, r2 = mkwav(GR, "Rec1_2.wav", b"\x01\x02"), mkwav(GR, "Rec12.wav", b"\x03\x04")
+gargs14 = _gargs(no_sidecars=False)
+def plan14(root, **over):
+    aa = argparse.Namespace(**{**vars(gargs14), **over})
+    stx = watcher.Store(TMP / "g14-state.json")
+    stx.data = json.loads(stx.path.read_text()) if stx.path.is_file() else {}
+    lgx = watcher.Store(TMP / "g14-ledger.json")
+    lgx.data = json.loads(lgx.path.read_text()) if lgx.path.is_file() else {}
+    out, _ = watcher.plan(root, aa, stx, lgx)
+    stx.save(); lgx.save()
+    return out, lgx
+plan14(GR)                                        # settle
+out, _ = plan14(GR)
+check(sorted(t["name"] for t in out) == ["Rec12.wav", "Rec1_2.wav"],
+      f"Rec1_2 and Rec12 are separate recordings, not twins ({sorted(t['name'] for t in out)})")
+# do the work, then remove one transcript: it must come back as WORK, not as a copy
+led14 = watcher.Store(TMP / "g14-ledger.json")
+watcher.gpu_state = lambda: (40.0, 0)
+watcher.transcribe_queue([mk(r1), mk(r2)], gargs14, led14)
+side2 = GR / "Rec12.transcript.md"
+text_before = side2.read_text(encoding="utf-8")
+side2.unlink()
+out, _ = plan14(GR)
+check([t["name"] for t in out] == ["Rec12.wav"],
+      f"a deleted transcript is queued for transcription, not reinstated ({[t['name'] for t in out]})")
+check(not side2.is_file(), "and nothing was written back behind its back")
+watcher.transcribe_queue([mk(r2)], gargs14, led14)
+check(side2.is_file() and side2.read_text(encoding="utf-8") == text_before,
+      "re-transcribing it reproduces the same transcript")
+# --restore-missing is the explicit, GPU-free alternative
+side2.unlink()
+out, _ = plan14(GR, restore_missing=True)
+check(out == [] and side2.is_file(), "--restore-missing writes the stored copy back instead")
+# the mp3/wav pair still counts as one recording, and one transcript covers both
+PAIR = TMP / "pair"; PAIR.mkdir(exist_ok=True)
+pw = mkwav(PAIR, "Twin.wav", b"\x05\x06")
+shutil.copyfile(pw, PAIR / "Twin.mp3")
+plan14(PAIR)
+jobs_pair, led_pair = plan14(PAIR)
+check(len(jobs_pair) == 1, f"the mp3/wav pair is one job, not two ({[t['name'] for t in jobs_pair]})")
+watcher.transcribe_queue(jobs_pair, gargs14, led_pair)
+pair_md = PAIR / "Twin.transcript.md"
+check(pair_md.is_file() and pair_md.read_text(encoding="utf-8").count("# Transcript") == 1,
+      "one sidecar covers both members (same stem), written once")
+pair_md.unlink()
+out_r, _ = plan14(PAIR, restore_missing=True)
+check(out_r == [] and pair_md.is_file(),
+      "--restore-missing writes it back from the canonical result without the GPU")
+pair_md.unlink()
+out_w, _ = plan14(PAIR)
+check([t["name"] for t in out_w] == [jobs_pair[0]["name"]],
+      "by default it is re-transcribed instead (folder = ground truth)")
 watcher.gpu_state = orig_state
 
 print("13) the GPU is handed back, and never held past the time limit")

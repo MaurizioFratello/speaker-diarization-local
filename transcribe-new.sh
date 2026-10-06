@@ -5,6 +5,8 @@
 #   transcribe-new.sh                 # the watched NAS folder, output to the terminal
 #   transcribe-new.sh /some/dir       # any other folder
 #   transcribe-new.sh --gui           # launcher mode: reports in a dialog instead
+#   transcribe-new.sh --restore       # instead of re-transcribing what you deleted,
+#                                     # write back the copy kept in data/ (no GPU)
 #
 # Safe to click twice: finished work is remembered by content hash, so a second
 # click re-checks and exits without loading anything, and the models are only
@@ -14,9 +16,11 @@ set -uo pipefail
 PROJ="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
 GUI=0
 ARGS=()
+EXTRA=""
 for a in "$@"; do
   case "$a" in
     --gui) GUI=1 ;;
+    --restore) EXTRA="--restore-missing" ;;
     *) ARGS+=("$a") ;;
   esac
 done
@@ -48,7 +52,7 @@ fi
 # Two passes, a few seconds apart: the first records each file's size+mtime, the
 # second only trusts it once they are unchanged. That is what stops a recording
 # that is still being copied in from being transcribed as if it were complete.
-run_pass() { ( cd "$PROJ" && "$PY" watcher.py --dir "$DIR" --formats md --min-age 2 --verbose ); }
+run_pass() { ( cd "$PROJ" && "$PY" watcher.py --dir "$DIR" --formats md --min-age 2 --verbose $EXTRA ); }
 run_pass 2>&1 | tee -a "$LOG" | sed 's/^/  /'
 sleep 5
 run_pass 2>&1 | tee -a "$LOG" | sed 's/^/  /'

@@ -153,8 +153,10 @@ Because the watched folder is a NAS share that FreeFileSync pushes into, a
   tools copy with the source timestamp, so an age check alone would happily
   transcribe a half-copied 450 MB recording. A local process holding the file
   open for writing also defers it (lsof, when available).
-- **One transcript per recording.** `X.mp3` and `X.wav` normalize to the same
-  recording; only the member with the fewest bytes per second of audio is read
+- **One transcript per recording.** `X.mp3` and `X.wav` are one recording
+  (identity = the file stem, ignoring case and extension only — deliberately
+  strict, so `Rec1_2.mp3` and `Rec12.mp3` are *not* merged and can never share a
+  transcript); only the member with the fewest bytes per second of audio is read
   (the same words, less traffic over the share). Identical content under
   different names is recognised by its SHA-256 and not re-transcribed.
 - **A transcript exists only when it is complete.** `data/watcher-ledger.json`
@@ -163,15 +165,19 @@ Because the watched folder is a NAS share that FreeFileSync pushes into, a
   segments from a *non-silent* file counts as a failure rather than success.
   Kilobyte-scale files are ignored as placeholders. Kill the process or crash
   the GPU mid-run and nothing is lost, nothing is duplicated.
-- **Missing output is re-created, not recomputed.** Delete a sidecar and the
-  next tick restores it from `data/transcripts/` — no GPU time. Same if a
-  two-way sync wipes the NAS copies; if this folder is mirror-synced *from*
-  somewhere, use `EXTRA_ARGS="--no-sidecars"` to keep transcripts local only.
+- **The folder is the ground truth.** A recording with no `Name.transcript.md`
+  beside it is work to be done, full stop — the watcher never writes back a copy
+  it kept in `data/` behind your back, because restoring is the direction in which
+  a file could end up carrying words that were never spoken on it. Delete a
+  transcript and the next run makes it again from the audio. If a *sync* wiped them
+  and you want the free path, ask for it explicitly with `--restore-missing`
+  (`./transcribe-new.sh --restore`): it re-renders from `data/results/<hash>.json`,
+  keyed by the SHA-256 of the audio, so it cannot mismatch either.
   The reverse holds too: lose `data/` entirely and a `Name.transcript.md` still
   beside the audio is *adopted* as done instead of re-running hours of work —
-  provided it is non-empty, carries our header and is not older than the audio
-  (which is what stops the stale transcript of an earlier recording, replaced
-  under the same name, from being trusted).
+  provided it is non-empty, is not older than the audio, and its title line names
+  this exact recording (`render_exports` writes `# Transcript — <file name>`), so a
+  foreign file dropped into that slot can never mark real work as finished.
 - **The GPU is borrowed, never occupied.** Before loading anything it asks
   `nvidia-smi` and stands down — exit 0, no models, work stays queued — if
   another process has taken the card (`--min-free-vram 2.0`, `--max-other-util

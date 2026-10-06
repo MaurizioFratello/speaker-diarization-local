@@ -314,10 +314,18 @@ def has_writer(path: Path) -> bool:
 
 
 def norm_stem(name: str) -> str:
-    """Recording identity within a folder: case/extension/punctuation-insensitive."""
+    """Recording identity within a folder: the file stem, ignoring case and extension only.
+
+    Deliberately strict. Deleting every non-alphanumeric used to make `Rec1_2.mp3` and
+    `Rec12.mp3` the same recording, so one transcript was transcribed and then written
+    beside both \u2014 a transcript of the wrong audio sitting next to a file it never
+    came from, which is worse than doing the work twice. Two encodings of one recording
+    still share a stem (X.mp3 / X.wav), and identical bytes under different names are
+    still deduplicated by content hash, which cannot be wrong by construction.
+    """
     stem = unicodedata.normalize("NFKD", Path(name).stem)
-    stem = re.sub(SIDECAR, "", stem).casefold().replace("&", "and")
-    return re.sub(r"[^a-z0-9]+", "", stem)
+    stem = re.sub(SIDECAR, "", stem)
+    return re.sub(r"\s+", " ", stem).strip().casefold()
 
 
 def scan(root: Path, min_age: float, state: Store, *, check_open: bool,
@@ -445,8 +453,17 @@ def plan(root: Path, args, state: Store,
                     break
         if done and not args.force:
             if _state_ok(done):
-                _heal_sidecars(group, done, args)
-                continue
+                if not _sidecars_missing(group, args) or getattr(args, "restore_missing", False):
+                    _heal_sidecars(group, done, args)
+                    continue
+                # The folder is the ground truth. A transcript that is not in it is
+                # treated as work that needs doing, not as something to reinstate from
+                # data/: if the user deleted it, quietly copying a stored copy back is
+                # both surprising and the route by which the wrong file's text could
+                # reappear beside this audio. --restore-missing opts into the free path
+                # (e.g. after a mirror sync wiped the folder's transcripts).
+                log(f"{done.get('name')}: no transcript in the folder — transcribing it "
+                    "(use --restore-missing to reinstate the stored copy instead)")
             log(f"stored transcript for {done.get('name')} is missing on disk — requeueing")
         if not args.force:
             adopted = _adopt_existing(group, args)
@@ -503,10 +520,14 @@ def _state_ok(entry: dict) -> bool:
 
 
 def _sidecar_text(entry: dict, fmt: str) -> str | None:
-    """Text for a sidecar: the local mirror if present, else re-render the canonical JSON."""
-    canon = (entry.get("formats") or {}).get(fmt)
-    if canon and Path(canon).is_file():
-        return Path(canon).read_text(encoding="utf-8")
+    """Render a sidecar from the canonical JSON belonging to *this* content hash.
+
+    The stored mirror copies under data/transcripts/ are archives, not a source to
+    write from: they are named after the file that produced them, and any doubt about
+    which recording a name belonged to is exactly how a transcript of one recording
+    could end up beside another. The canonical result is keyed by the SHA-256 of the
+    audio that is sitting in the folder, so re-rendering from it cannot be mismatched.
+    """
     if entry.get("result") and Path(entry["result"]).is_file():
         try:
             job = json.loads(Path(entry["result"]).read_text(encoding="utf-8"))
@@ -565,6 +586,18 @@ def _adopt_existing(group: list[dict], args) -> dict | None:
                 "formats": {fmt: str(side)},
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
     return None
+
+
+def _sidecars_missing(group: list[dict], args) -> bool:
+    """True if this recording has no transcript at all next to it in the folder.
+
+    Asks whether *nothing* is there rather than whether every member has one: a pair
+    like X.mp3 / X.wav is one recording, its transcript is shared by stem, and a gap
+    on one member is healed from the canonical JSON (safe); an empty folder entry is
+    a deletion, and that means doing the work.
+    """
+    return not any(it["path"].with_name(f"{it['path'].stem}.transcript.{fmt}").is_file()
+                   for it in group for fmt in args.format_list)
 
 
 def _heal_sidecars(group: list[dict], entry: dict, args) -> None:
@@ -833,7 +866,9 @@ def write_transcript(src: Path, digest: str, segs: list[dict], entry: dict, args
     # get their transcripts from this one run instead of a second transcription.
     targets = [src] + [p for p in (extra_paths or []) if p != src]
     for fmt in args.format_list:
-        mirror = MIRROR_DIR / f"{src.stem}.transcript.{fmt}"
+        # Content-addressed: a flat, name-keyed mirror let two different recordings
+        # that share a stem (in this or another watched folder) overwrite each other.
+        mirror = MIRROR_DIR / digest[:12] / f"{src.stem}.transcript.{fmt}"
         _atomic_write(mirror, rendered[fmt])
         formats[fmt] = str(mirror)
         if args.no_sidecars:
@@ -990,6 +1025,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ignore-open", action="store_true", help="skip the lsof write-holder check")
     ap.add_argument("--reset", action="store_true", help="forget all remembered state/ledger (re-scan from zero)")
     ap.add_argument("--progress-every", type=float, default=30.0, help="seconds between progress lines")
+    ap.add_argument("--restore-missing", action="store_true",
+                    help="write back the copy kept in data/ instead of re-transcribing a "
+                         "transcript that is gone from the folder (free, no GPU; meant for "
+                         "after a mirror sync wiped the folder)")
     ap.add_argument("--verbose", action="store_true", default=None,
                     help="print the summary even when there was nothing to do; a manual "
                          "run should never be silent, an unattended tick should be")
