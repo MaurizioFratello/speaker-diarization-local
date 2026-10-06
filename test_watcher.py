@@ -8,6 +8,7 @@ import argparse, errno, json, os, pathlib, shutil, signal, subprocess, sys, temp
 PROJ = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJ))
 import watcher
+HEAVY_AT_START = {m for m in sys.modules if m.split(".")[0] in ("torch","nemo","soundfile")}
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="watcher-test-"))
 TMP.mkdir(parents=True, exist_ok=True)
@@ -29,8 +30,12 @@ FAULT = {"poison": RuntimeError("CUDA out of memory"),
          "corrupt": RuntimeError("audio conversion failed (ffmpeg rc=1): Invalid data found when processing input")}
 
 
+COUNT = {"init": 0, "release": 0}
+
+
 class Transcriber:
-    def __init__(self, **kw): pass
+    def __init__(self, **kw):
+        COUNT["init"] += 1
 
     def transcribe(self, wav, publish=None):
         for tag, err in FAULT.items():
@@ -57,8 +62,20 @@ SILENT = {"value": False}
 mod = types.ModuleType("pipeline"); mod.Transcriber = Transcriber; mod.prepare_audio = prepare_audio
 mod._is_silent_wav = lambda wav, threshold=0.0: SILENT["value"]
 sys.modules["pipeline"] = mod
+# min_free_vram=0 / max_other_util=100 keep the GPU courtesy guard inert for the
+# queueing tests; sections 12-13 exercise that guard explicitly.
 args = argparse.Namespace(device="cuda", max_speakers=None, progress_every=0.0,
-                         no_sidecars=True, format_list=["md"])
+                         no_sidecars=True, format_list=["md"], min_free_vram=0.0,
+                         max_other_util=100, gpu_time_limit=0.0, mount_wait=25.0)
+
+
+def _gargs(**over):
+    base = dict(device="cuda", max_speakers=None, progress_every=0.0, no_sidecars=True,
+                format_list=["md"], min_free_vram=0.0, max_other_util=100,
+                gpu_time_limit=0.0, mount_wait=25.0, min_age=0.0, only=None,
+                limit=0, force=False, dry_run=False, ignore_open=True)
+    base.update(over)
+    return argparse.Namespace(**base)
 
 
 def mk(path):
@@ -220,6 +237,7 @@ check(watcher._STOP["requested"] and done9 == 0 and failed9 == 0,
       f"interrupted run reported cleanly (done={done9} failed={failed9})")
 check(e9.get("status") == "pending", f"the interrupted file stays queued ({e9.get('status')})")
 MODE["sigterm_on"] = None
+watcher._STOP["requested"] = False        # a later tick starts a fresh process
 
 print("9) GPU-contention detection and classifier sanity")
 check(not watcher._environmental(RuntimeError("No such file or directory: '/data/bedroom/rec.wav'")),
@@ -250,6 +268,157 @@ check(stA.data.get(str(O), {}).get("digest") == "keep-this-too",
       "another folder's cached hash survived this scan")
 check(str(B) in stA.data and str(TMP / "vanished.wav") not in stA.data,
       "files of this folder are still added/pruned correctly")
+
+
+print("11) an idle tick never touches the GPU stack")
+IDLE = TMP / "idle"; IDLE.mkdir(exist_ok=True)
+(IDLE / "fresh.wav").write_bytes(b"\x01\x02" * 3000)      # too new: settles, nothing to do
+calls = {"n": 0}
+real_tq = watcher.transcribe_queue
+watcher.transcribe_queue = lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or (0, 0)
+# baseline is taken HERE, not at import: the stubbed runs in sections 1-7 legitimately
+# go through transcribe_queue, whose release_gpu() imports torch to empty the cache
+baseline = set(sys.modules)
+rc_idle = watcher.main(["--dir", str(IDLE), "--min-age", "999999"])
+watcher.transcribe_queue = real_tq
+check(rc_idle == 0 and calls["n"] == 0, "nothing pending -> the GPU queue was never invoked")
+newly = sorted({m.split(".")[0] for m in set(sys.modules) - baseline
+                if m.split(".")[0] in ("torch", "nemo", "soundfile", "app", "numpy", "scipy")})
+check(not newly, f"idle tick loaded no GPU-stack module (new: {newly})")
+
+print("12) a busy GPU makes it stand down instead of queueing behind your job")
+orig_state, orig_rel = watcher.gpu_state, watcher.release_gpu
+
+
+def tq(**over):
+    """One queue run against a fresh ledger; returns (done, failed, models loaded)."""
+    led = watcher.Store(TMP / f"l12-{len(COUNT)}-{time.time():.3f}.json")
+    led.data = {}
+    before = COUNT["init"]
+    d, f = watcher.transcribe_queue([mk(B)], _gargs(**over), led)
+    return d, f, COUNT["init"] - before
+
+
+watcher.gpu_state = lambda: (3.0, 94)          # like sglang serving a request right now
+d, f, n = tq(min_free_vram=2.0, max_other_util=25)
+check(d == 0 and f == 0 and n == 0,
+      "deferred at 94% util with 3 GiB free, without loading a single model")
+
+watcher.gpu_state = lambda: (0.5, 2)           # idle card, but not enough VRAM spare
+d, f, n = tq(min_free_vram=2.0, max_other_util=25)
+check(d == 0 and f == 0 and n == 0, "defers when the VRAM floor is not met")
+
+d, f, n = tq(device="cpu", min_free_vram=2.0, max_other_util=25)
+check(n == 1, "--device cpu ignores the GPU guard (there is no GPU to defer for)")
+
+watcher.gpu_state = lambda: (None, None)       # nvidia-smi stops answering
+d, f, n = tq(min_free_vram=2.0, max_other_util=25)
+check(n == 0, "stands down instead of assuming an idle card it cannot see (fails closed)")
+
+watcher.gpu_state = lambda: (3.0, 94)           # the resident server is at full tilt
+d, f, n = tq(min_free_vram=2.0, max_other_util=100)
+check(n == 1, "--max-other-util 100 disables the advisory utilisation guard")
+
+# A batch that opened the gate while the card was idle must run to the end of the
+# queue even if utilisation climbs: sglang idles at 0 % and sits at ~95 % while
+# answering prompts, yet 14 h of backlog completed alongside it. Only VRAM is a
+# hard stop between files. Uses its own files so no fault armed by an earlier
+# section can leak in through the stub's substring matching.
+FL = TMP / "flip"; FL.mkdir(exist_ok=True)
+jobs12 = []
+for nm in ("first.wav", "second.wav"):
+    fp = FL / nm
+    with wave.open(str(fp), "wb") as wv:
+        wv.setnchannels(1); wv.setsampwidth(2); wv.setframerate(16000)
+        wv.writeframes(b"\x07\x06" * 4000)
+    jobs12.append(mk(fp))
+
+probe = {"i": 0}
+
+
+def flipping():
+    probe["i"] += 1
+    return (40.0, 0) if probe["i"] <= 2 else (40.0, 90)   # quiet at the gate, busy after
+
+
+watcher.gpu_state = flipping
+led12b = watcher.Store(TMP / "l12b.json"); led12b.data = {}
+before = COUNT["init"]
+d, f = watcher.transcribe_queue(list(jobs12), _gargs(min_free_vram=2.0, max_other_util=25), led12b)
+check(d == 2 and f == 0 and probe["i"] >= 3 and COUNT["init"] - before == 1,
+      f"utilisation climbing mid-batch does not stop it (d={d} f={f} probes={probe['i']} "
+      f"models={COUNT['init'] - before}; only the VRAM floor is a hard stop)")
+
+watcher.gpu_state = orig_state
+
+watcher.gpu_state = orig_state
+
+print("13) the GPU is handed back, and never held past the time limit")
+jobs = [mk(B)]
+released = {"n": 0}
+watcher.release_gpu = lambda *a: released.__setitem__("n", released["n"] + 1)
+led13 = watcher.Store(TMP / "l13.json"); led13.data = {}
+watcher.gpu_state = lambda: (40.0, 0)
+watcher.transcribe_queue(list(jobs), _gargs(min_free_vram=2.0), led13)
+check(released["n"] == 1, f"models dropped + allocator flushed after the run ({released['n']}x)")
+led14 = watcher.Store(TMP / "l14.json"); led14.data = {}
+SLOW = TMP / "slow.wav"
+with wave.open(str(SLOW), "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b"\x03\x04" * 7000)
+class Slow(Transcriber):
+    def transcribe(self, wav, publish=None):
+        time.sleep(3.0); return list(SEGS)
+real_cls = sys.modules["pipeline"].Transcriber
+sys.modules["pipeline"].Transcriber = Slow
+watcher._STOP["requested"] = False
+t0 = time.time()
+d14, f14 = watcher.transcribe_queue([mk(SLOW)], _gargs(gpu_time_limit=1/60.0), led14)  # 1 second
+sys.modules["pipeline"].Transcriber = real_cls
+check(time.time() - t0 < 2.9 and d14 == 0 and not led14.data.get(watcher.file_hash(SLOW), {}).get("status") == "done",
+      f"watchdog cut a wedged run at the limit ({time.time()-t0:.1f}s) and left it queued")
+
+print("14) a transcript already in the folder is adopted, not recomputed")
+AD = TMP / "adopt"; AD.mkdir(exist_ok=True)
+V = AD / "voice.wav"
+with wave.open(str(V), "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b"\x09\x08" * 5000)
+SIDE = V.with_name("voice.transcript.md")
+a = _gargs()
+
+def plan_once():
+    stx = watcher.Store(TMP / "ast.json")
+    stx.data = json.loads(stx.path.read_text()) if stx.path.is_file() else {}
+    lgx = watcher.Store(TMP / "alg.json"); lgx.data = {}
+    out, _ = watcher.plan(AD, a, stx, lgx)
+    return out, lgx
+
+plan_once()                                                    # settle it first
+SIDE.write_text("# Transcript — voice.wav\n\n**Speaker 0** `[00:00:00.100]`  hi\n", encoding="utf-8")
+COUNT["init"] = 0
+out, lgx = plan_once()
+check(out == [] and sum(1 for e in lgx.data.values() if e.get("adopted")) == 1
+      and COUNT["init"] == 0, "existing markdown -> adopted, zero model loads")
+
+SIDE.unlink()
+out, lgx = plan_once()
+check([t["name"] for t in out] == ["voice.wav"] and not lgx.data,
+      "no markdown there -> queued as normal work (not silently skipped)")
+
+# A transcript left behind by an earlier recording that was later replaced under the
+# same name must never be adopted: it predates the audio.
+SIDE.write_text("# Transcript — voice.wav\n\n**Speaker 0** `[00:00:00.100]`  hi\n", encoding="utf-8")
+old = time.time() - 3600
+os.utime(SIDE, (old, old))
+out, lgx = plan_once()
+check([t["name"] for t in out] == ["voice.wav"] and not lgx.data,
+      "a transcript older than the audio is stale and is NOT adopted")
+# and a file that merely sits in that slot but is not our export is ignored
+SIDE.write_text("somebody's notes, no header\n", encoding="utf-8")
+os.utime(SIDE, (time.time(), time.time()))
+out, lgx = plan_once()
+check([t["name"] for t in out] == ["voice.wav"],
+      "a foreign file named *.transcript.md is not adopted")
+watcher.release_gpu = orig_rel
 
 
 print()

@@ -36,6 +36,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 import wave
@@ -231,8 +232,9 @@ def app_process_running() -> bool:
 _STOP = {"requested": False}
 
 
-class ShutdownRequested(RuntimeError):
-    pass
+class ShutdownRequested(BaseException):
+    """Deliberately not an Exception: an `except Exception` somewhere inside NeMo
+    must not be able to swallow our own stop request and keep holding the card."""
 
 
 def install_signal_handlers() -> None:
@@ -446,6 +448,12 @@ def plan(root: Path, args, state: Store,
                 _heal_sidecars(group, done, args)
                 continue
             log(f"stored transcript for {done.get('name')} is missing on disk — requeueing")
+        if not args.force:
+            adopted = _adopt_existing(group, args)
+            if adopted is not None:
+                ledger.data[next(it["digest"] for it in group)] = adopted
+                ledger.save()
+                continue
         rep = cheapest(group)
         if len(group) > 1:
             others = sorted(str(g["path"].name) for g in group if g is not rep)
@@ -484,7 +492,13 @@ def result_path(digest: str) -> Path:
 
 
 def _state_ok(entry: dict) -> bool:
-    """A ledger 'done' is only real while its canonical JSON still exists."""
+    """A ledger 'done' is only real while its output still exists on disk."""
+    if entry.get("adopted"):
+        # An adopted entry has no canonical JSON: the transcript beside the audio is
+        # the evidence. Without this it would fail the check every tick, log
+        # "missing on disk \u2014 requeueing" and be re-adopted forever.
+        want = entry.get("formats") or {}
+        return bool(want) and all(Path(p).is_file() for p in want.values())
     return bool(entry.get("result")) and Path(entry["result"]).is_file()
 
 
@@ -500,9 +514,56 @@ def _sidecar_text(entry: dict, fmt: str) -> str | None:
             return None
         if not isinstance(job, dict) or "segments" not in job:
             return None
-        import app as webapp
+        from exports import render_exports
 
-        return webapp.render_exports(job)[fmt]
+        return render_exports(job)[fmt]
+    return None
+
+
+def _adopt_existing(group: list[dict], args) -> dict | None:
+    """Trust a transcript that is already in the folder instead of re-running the GPU.
+
+    The ledger is normally the source of truth, but it can be lost (data/ wiped,
+    machine reimaged) while the markdown exported beside the audio survives. Re-
+    transcribing ~14 h of recordings to rediscover what is already on disk is the
+    one outcome this watcher must never produce, so a plausible sidecar is enough:
+    it must be named after this exact file, be non-empty, carry our header, and be
+    at least as new as the audio (which rules out the stale transcript of an
+    earlier recording that was later replaced under the same name).
+    """
+    fmt = args.format_list[0]
+    names = {it["path"].name for it in group}          # a twin pair shares one title
+    for it in group:
+        side = it["path"].with_name(f"{it['path'].stem}.transcript.{fmt}")
+        try:
+            st = side.stat()
+        except OSError:
+            continue
+        if st.st_size < 20 or st.st_mtime + 2 < it["mtime"]:
+            continue
+        try:
+            head = side.open("r", encoding="utf-8").read(400)
+        except (OSError, UnicodeDecodeError):
+            continue
+        title = (head.splitlines() or [""])[0]
+        if not title.startswith("# Transcript"):
+            continue
+        # render_exports titles its output `# Transcript \u2014 <file name>`, so insist
+        # that the text in our slot is about *this* recording. Without this, any file
+        # someone renamed to fit would be believed, and the recording would end up
+        # "done" carrying somebody else's words.
+        titled = title.partition("\u2014")[2].strip()
+        if titled not in names:
+            log(f"not adopting {side.name}: it is titled {titled!r}, not one of "
+                f"{sorted(names)}")
+            continue
+        log(f"adopting existing {side.name} ({st.st_size} bytes) — not re-transcribing "
+            f"{it['path'].name}")
+        return {"name": it["path"].name, "path": str(it["path"]), "status": "done",
+                "size": it["size"], "mtime": it["mtime"], "adopted": True,
+                "segments": None, "speakers": [], "result": None,
+                "formats": {fmt: str(side)},
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
     return None
 
 
@@ -522,7 +583,17 @@ def _heal_sidecars(group: list[dict], entry: dict, args) -> None:
 
 
 def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
-    """Load the models once, then run the queue serially. Returns (done, failed)."""
+    """Load the models once, then run the queue serially. Returns (done, failed).
+
+    Reached only when `todo` is non-empty, and the import below is the first line
+    in the program that touches torch/CUDA: an idle tick never gets here.
+    """
+    reason = gpu_deferral_reason(args)
+    if reason:
+        log(f"GPU not free: {reason} — standing down without loading anything; "
+            "the next tick will try again")
+        return 0, 0
+
     from pipeline import Transcriber, prepare_audio  # heavy: pulls in the GPU stack
     try:
         from pipeline import _is_silent_wav as is_silent
@@ -535,8 +606,24 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
     done = failed = 0
     aborted = False
     env_skips = 0
+    watchdog = _gpu_watchdog(getattr(args, "gpu_time_limit", 0))
     try:
         for n, job in enumerate(todo, 1):
+            # Ask again before every file. Whoever opened the gate cannot be trusted
+            # for a batch that may run for hours: the card can be taken in between.
+            # Utilisation is left out here on purpose \u2014 it swings between 0 and 95 %
+            # every second on a box with a resident server, and the backlog provably
+            # completes alongside it; only the VRAM floor is a hard reason to stop.
+            if _STOP["requested"]:
+                log("  stop requested \u2014 leaving the rest of the queue for the next run")
+                aborted = True
+                break
+            reason = gpu_deferral_reason(args, include_util=False)
+            if reason:
+                log(f"  VRAM taken over mid-queue: {reason} \u2014 leaving the rest "
+                    "of the queue for the next run")
+                aborted = True
+                break
             src: Path = job["path"]
             digest: str = job["digest"]
             entry = dict(ledger.data.get(digest) or {})
@@ -667,6 +754,12 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
             log(f"stopped early: {done} transcribed, {len(todo) - done - failed} left for the next tick")
         return done, failed
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
+        if transcriber is not None:
+            transcriber = None           # our reference goes first, or the models
+            release_gpu()                # stay alive through gc.collect()
+            log("GPU released (models dropped, allocator cache flushed)")
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
@@ -725,10 +818,10 @@ def write_transcript(src: Path, digest: str, segs: list[dict], entry: dict, args
     plan() also accepts the file itself as proof: between the write and the
     ledger flush a SIGKILL must not be able to make us pay the GPU twice.
     """
-    import app as webapp  # reuse its renderer: UI and watcher export identical text
+    from exports import render_exports  # shared with the web app; stdlib-only on purpose
 
     job = {"name": src.name, "segments": segs, "labels": {}}
-    rendered = webapp.render_exports(job)
+    rendered = render_exports(job)
     canon = result_path(digest)
     _atomic_write(canon, json.dumps(
         {"name": src.name, "segments": segs, "labels": {}}, ensure_ascii=False, indent=1))
@@ -749,6 +842,127 @@ def write_transcript(src: Path, digest: str, segs: list[dict], entry: dict, args
             _atomic_write(target.with_name(f"{target.stem}.transcript.{fmt}"), rendered[fmt])
     entry["formats"] = formats
     entry["copies"] = [str(p) for p in targets[1:]]
+
+
+
+# --------------------------------------------------------------- GPU courtesy
+#
+# The card belongs to the user, not to this watcher. Three rules follow from
+# that: no CUDA is touched at all unless a file is actually waiting (torch is
+# imported lazily, only inside transcribe_queue), the run stands down instead of
+# queuing behind someone else's work, and the models are dropped before exiting.
+
+def gpu_state() -> tuple[float | None, int | None]:
+    """(worst-case free GiB, peak utilization %) from nvidia-smi; (None, None) if unreadable.
+
+    Sampled three times and reduced pessimistically (min free, max busy): one reading
+    of utilization.gpu is the busy fraction of the last ~1 s window, so a resident
+    inference server between requests reads 0 % and would let us walk onto a card
+    that is busy a moment later.
+    """
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        return None, None
+    free = util = None
+    try:
+        for attempt in range(3):
+            proc = subprocess.run(
+                [smi, "--query-gpu=memory.free,utilization.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15)
+            row = next(ln for ln in proc.stdout.splitlines() if ln.strip())
+            f_mb, u = [float(x) for x in row.replace(" ", "").split(",")[:2]]
+            free = f_mb / 1024.0 if free is None else min(free, f_mb / 1024.0)
+            util = int(u) if util is None else max(util, int(u))
+            if attempt < 2:
+                time.sleep(0.12)
+        return free, util
+    except Exception:
+        return None, None
+
+
+def gpu_deferral_reason(args, *, include_util: bool = True) -> str | None:
+    """Why the GPU must not be taken right now; None means go ahead.
+
+    `include_util=False` keeps only the hard VRAM floor, which is what a running
+    batch re-checks between files; utilisation is an advisory gate for the start.
+    """
+    if getattr(args, "device", None) == "cpu":
+        return None                      # no GPU involved at all
+    if shutil.which("nvidia-smi") is None:
+        return None                      # no NVIDIA tooling: nothing to be polite about
+    free_gb, util = gpu_state()
+    if free_gb is None:
+        # Fail closed. A courtesy guard that assumes an idle card whenever it cannot
+        # see the card has the priority exactly backwards for this watcher.
+        return ("nvidia-smi did not answer, so the state of the card is unknown "
+                "(driver busy, or the query timed out)")
+    if free_gb < args.min_free_vram:
+        return f"only {free_gb:.1f} GiB of VRAM free, {args.min_free_vram:.1f} GiB needed"
+    if include_util and util is not None and util > args.max_other_util:
+        return f"GPU is {util}% busy with another job (limit {args.max_other_util}%) " \
+               f"and {free_gb:.1f} GiB is free"
+    return None
+
+
+def release_gpu(_unused=None) -> None:
+    """Hand the card back: flush the caching allocator, collect what is unreferenced.
+
+    The caller must drop its own reference first; rebinding a parameter here would
+    have left the models alive through the collection and made this log a lie.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception:
+        pass                             # exiting releases the context anyway
+    return None
+
+
+def _gpu_watchdog(minutes: float):
+    """Never hold the card forever, even if a decoder wedges: SIGTERM ourselves,
+    which the installed handler turns into a clean ShutdownRequested."""
+    if minutes <= 0:
+        return None
+
+    def _fire():
+        log(f"GPU time limit of {minutes:.0f} min reached — giving the card back")
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except OSError:
+            pass
+
+    timer = threading.Timer(minutes * 60, _fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _path_is_dir_bounded(path: Path, timeout: float):
+    """is_dir() that cannot hang forever.
+
+    The watched folder is an autofs/CIFS mount reached over a VPN: touching the
+    path can block in an uninterruptible kernel call while the network comes up,
+    so the probe runs in a daemon thread and a wedged probe is a clean no-op.
+    """
+    box: dict = {}
+
+    def _probe():
+        try:
+            box["v"] = path.is_dir()
+        except OSError as exc:
+            box["v"], box["err"] = None, exc
+
+    t = threading.Thread(target=_probe, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return None
+    return box.get("v")
 
 
 # ------------------------------------------------------------------- entrypoint
@@ -776,6 +990,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ignore-open", action="store_true", help="skip the lsof write-holder check")
     ap.add_argument("--reset", action="store_true", help="forget all remembered state/ledger (re-scan from zero)")
     ap.add_argument("--progress-every", type=float, default=30.0, help="seconds between progress lines")
+    ap.add_argument("--min-free-vram", type=float, default=float(os.environ.get("SPEAKER_MIN_FREE_VRAM", "2.0")),
+                    help="GiB that must be free before the models are loaded")
+    ap.add_argument("--max-other-util", type=int, default=int(os.environ.get("SPEAKER_MAX_OTHER_UTIL", "25")),
+                    help="stand down instead of loading models when the GPU is busier than this % "
+                         "(100 = never defer on utilization)")
+    ap.add_argument("--gpu-time-limit", type=float, default=float(os.environ.get("SPEAKER_GPU_TIME_LIMIT", "480")),
+                    help="minutes of GPU work per run before giving the card back (0 = unlimited)")
+    ap.add_argument("--mount-wait", type=float, default=float(os.environ.get("SPEAKER_MOUNT_WAIT", "25")),
+                    help="seconds to wait for the watched folder to answer before standing down")
     ap.add_argument("--app-port", type=int,
                     default=int(os.environ.get("SPEAKER_APP_PORT", "8765")),
                     help="port the web app serves on; while it answers, the watcher "
@@ -788,8 +1011,21 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"unknown format(s): {', '.join(bad) or 'none given'} (have: {', '.join(FORMATS)})")
 
     root = args.dir.expanduser()
-    if not root.is_dir():
-        log(f"ERROR {root} is not a readable folder — is the NAS mounted?")
+    probe = _path_is_dir_bounded(root, args.mount_wait)
+    if probe is None:
+        log(f"WARN {root} is not answering (share still coming up at boot?) — "
+            f"no GPU work this tick")
+        sys.stdout.flush()
+        os._exit(0)                      # the wedged stat thread cannot be joined
+    is_dir = probe
+    if not is_dir:
+        if not root.exists():
+            # Normal at boot on an automounted VPN share: the path is simply not
+            # there yet, so this is a clean no-op that the timer retries — not a
+            # failure, and no red unit every few minutes during network bring-up.
+            log(f"WARN {root} is not there (yet) -- share not mounted? nothing to do")
+            return 0
+        log(f"ERROR {root} exists but is not a folder -- check WATCH_DIR")
         return 2
 
     lock = acquire_lock()
@@ -845,11 +1081,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     done, failed = transcribe_queue(todo, args, ledger)
+    rc = 0 if _STOP["requested"] else (1 if failed else 0)
     if _STOP["requested"]:
         log(f"stopped on request after {done} file(s); the rest stay queued for the next tick")
-        return 0
-    log(f"finished: {done} transcribed, {failed} failed")
-    return 1 if failed else 0
+    else:
+        log(f"finished: {done} transcribed, {failed} failed")
+    strays = [t for t in threading.enumerate()
+              if t is not threading.main_thread() and not t.daemon]
+    if strays:
+        # NeMo/torch can leave a housekeeping thread alive; abandoning it with a
+        # hard exit is the only way to be sure the process — and with it the CUDA
+        # context and its memory — really goes back to the system.
+        log(f"{len(strays)} non-daemon thread(s) still alive "
+            f"({', '.join(t.name for t in strays[:3])}); exiting hard to release everything")
+        sys.stdout.flush()
+        os._exit(rc)
+    return rc
 
 
 if __name__ == "__main__":

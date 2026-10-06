@@ -18,6 +18,16 @@ FORMATS="md"                                # md,txt,json,srt,vtt
 INTERVAL="3"                                  # minutes between scans
 MIN_AGE="180"                               # seconds a file must be unchanged
 APP_PORT="8765"                             # your web app's port; while it serves, the watcher waits
+MOUNT_WAIT="25"                             # seconds to wait for the share at boot before standing down
+MIN_FREE_VRAM="2.0"                         # GiB that must be free before models load
+# Utilisation is deliberately NOT a gate by default (100 = ignore it). On a box with a
+# resident inference server it is meaningless: nvidia-smi reads 0 % between requests and
+# ~95 % while one is in flight, so gating on it starves the queue for hours without ever
+# protecting anything. The VRAM floor below is the guard that actually matters: the card
+# is 96 GB and the models fit in the ~3 GB a 93 GB server leaves over, which is how 14 h
+# of backlog got transcribed alongside it. Set e.g. 60 to also stand down during heavy use.
+MAX_OTHER_UTIL="100"
+GPU_TIME_LIMIT="480"                        # minutes of GPU work per run, then give the card back
 EXTRA_ARGS=""                               # e.g. "--no-sidecars" or "--max-speakers 4"
 # ----------------------------------------------------------------------------
 
@@ -41,10 +51,10 @@ write_units() {
 [Unit]
 Description=Transcribe new recordings with speaker separation (${WATCH_DIR})
 Documentation=file://${DOC_PATH}/README.md
-# Quietly skip ticks while the share is not mounted, instead of failing loudly.
-# NB: systemd path settings must stay unquoted; only ExecStart arguments are quoted.
-ConditionPathIsDirectory=${WATCH_DIR}
 After=network-online.target remote-fs.target
+# Unattended retry job: never let a burst of failed ticks trip the start limit,
+# or the timer would keep firing while systemd refuses to start anything.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -52,6 +62,13 @@ WorkingDirectory=${PROJ}
 ExecStart="${PY}" "${PROJ}/watcher.py" --dir "${WATCH_DIR}" --formats ${FORMATS} --min-age ${MIN_AGE} ${EXTRA_ARGS}
 Environment=PYTHONUNBUFFERED=1
 Environment=SPEAKER_APP_PORT=${APP_PORT}
+# The share is autofs/CIFS over a VPN address: watcher.py probes it in a
+# bounded daemon thread instead of hanging in an uninterruptible stat(), and
+# the GPU thresholds below keep it off the card while you are using it.
+Environment=SPEAKER_MOUNT_WAIT=${MOUNT_WAIT}
+Environment=SPEAKER_MIN_FREE_VRAM=${MIN_FREE_VRAM}
+Environment=SPEAKER_MAX_OTHER_UTIL=${MAX_OTHER_UTIL}
+Environment=SPEAKER_GPU_TIME_LIMIT=${GPU_TIME_LIMIT}
 # Be gentle: this should not compete with an interactive session or the NAS.
 Nice=10
 IOSchedulingClass=best-effort
@@ -104,7 +121,14 @@ case "${1:-install}" in
     systemctl_user --no-pager --full list-timers speaker-watcher.timer || true
     echo
     echo "Installed. Check with: ./setup-watcher.sh status"
-    echo "Nothing is transcribed before two runs have seen a file settled (~2 ticks)."
+    echo "Nothing is transcribed before two runs have seen a file settled (~2 ticks.)"
+  echo "Prefer to trigger it yourself? ./setup-watcher.sh pause"
+    ;;
+  pause)
+    # Keep the units installed but stop the schedule: use `run` (or ask your agent
+    # to) whenever you actually want the queue worked. `install` turns it back on.
+    systemctl_user disable --now speaker-watcher.timer 2>/dev/null || true
+    echo "Timer paused. Transcribe on demand with: ./setup-watcher.sh run  (or: ./setup-watcher.sh install)"
     ;;
   uninstall)
     systemctl_user disable --now speaker-watcher.timer 2>/dev/null || true

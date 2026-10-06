@@ -111,6 +111,7 @@ Prints `[{"text", "start", "end", "speaker"}, ...]` segments.
 |---|---|
 | `app.py` | FastAPI server: upload, jobs, exports, media playback |
 | `pipeline.py` | NeMo diarization+ASR pipeline + ffmpeg pre-converter |
+| `exports.py` | Transcript renderers (md/txt/json/srt/vtt), stdlib-only by design |
 | `watcher.py` | One-shot folder scanner: transcribes what is new, then exits |
 | `setup-watcher.sh` | Installs/removes the systemd timer that runs `watcher.py` |
 | `static/index.html` | Single-page drag & drop UI (no external assets) |
@@ -165,6 +166,23 @@ Because the watched folder is a NAS share that FreeFileSync pushes into, a
   next tick restores it from `data/transcripts/` — no GPU time. Same if a
   two-way sync wipes the NAS copies; if this folder is mirror-synced *from*
   somewhere, use `EXTRA_ARGS="--no-sidecars"` to keep transcripts local only.
+  The reverse holds too: lose `data/` entirely and a `Name.transcript.md` still
+  beside the audio is *adopted* as done instead of re-running hours of work —
+  provided it is non-empty, carries our header and is not older than the audio
+  (which is what stops the stale transcript of an earlier recording, replaced
+  under the same name, from being trusted).
+- **The GPU is borrowed, never occupied.** Before loading anything it asks
+  `nvidia-smi` and stands down — exit 0, no models, work stays queued — if
+  another process has taken the card (`--min-free-vram 2.0`, `--max-other-util
+  25`), so a timer tick cannot queue behind or squeeze an inference server,
+  Blender, or a training run. `--device cpu` skips the guard entirely, and
+  `--max-other-util 100` disables only the utilisation half of it (use that if
+  your resident server idles at 100% and you still want transcription).
+  `--gpu-time-limit 480` is a hard ceiling on one run so a wedged model can never
+  hold the card indefinitely. When work is done the models are dropped, the
+  CUDA caching allocator is flushed, and any thread still keeping the process
+  alive is cut with a hard exit — verified by `nvidia-smi` showing no leftover
+  compute process, and by an idle tick importing neither `torch` nor `nemo`.
 - **Bad files are set aside, the queue keeps moving.** Three failures on one
   file quarantines it (see `--retry-failed`). GPU or share errors (OOM while
   something else owns the VRAM, a CIFS `Input/output error`, a wrapped `EIO`)
@@ -180,14 +198,27 @@ Because the watched folder is a NAS share that FreeFileSync pushes into, a
   and is marked done, instead of being retried forever.
 
 Transcripts are written as GitHub-flavoured markdown (`**Speaker 1**
-`[00:00:04.6]`  text`) through `app.py`'s own exporter, so a watcher file and a
-browser download are the same text. The canonical copy is
+`[00:00:04.6]`  text`) through `exports.py`, the same renderer the web app uses,
+so a watcher file and a browser download are byte-identical text. It lives in a
+separate stdlib-only module on purpose: `app.py` imports NeMo at module level,
+and a 3-minute timer that merely restores a sidecar must not drag the GPU stack
+into memory. The canonical copy is
 `data/results/<content-hash-12>.json` in the web app's job format — those
 transcripts can be opened and speaker-renamed in the UI as well.
 
 Useful flags: `--only REGEX` (one recording), `--limit N`, `--formats md,srt`,
 `--device cpu`, `--max-speakers 4` (or `NEMODIAR_MAX_SPKS=4`: fewer streams,
 less VRAM — useful when another GPU job is resident), `--force`, `--reset`.
+The GPU courtesy thresholds are set in `setup-watcher.sh` as `MIN_FREE_VRAM`,
+`MAX_OTHER_UTIL`, `GPU_TIME_LIMIT`, `MOUNT_WAIT` and reach `watcher.py` as
+`Environment=` variables.
+
+It is safe at boot: the timer is installed as a *user* unit with lingering
+enabled (`loginctl enable-linger`), so it runs before you log in, and
+`Persistent=true` catches up on ticks missed while the machine was off. The NAS
+is `x-systemd.automount`-managed and `watcher.py` probes the folder in a daemon
+thread with a `--mount-wait` deadline, so an unreachable share costs one quiet
+tick instead of a job stuck in an uninterruptible CIFS stat forever.
 
 Those failure rules are covered by `test_watcher.py` (stubbed GPU stack, throwaway
 folder; the real `data/` and GPU are untouched):
@@ -207,3 +238,21 @@ folder; the real `data/` and GPU are untouched):
   they are not identities. Max 8 speakers per file.
 - **Windows firewall prompt** on first run: allow it for localhost, or run with
   `--host 127.0.0.1` (default).
+
+### Manual mode (what is installed here)
+
+No timer or systemd unit is installed on this machine — nothing transcribes by
+itself, and nothing holds the GPU between runs. When new recordings land, work
+the queue by hand:
+
+```bash
+.venv/bin/python watcher.py --dir /mnt/nas/IFX/03_Music --formats md   # twice: the
+# first pass records the file's size+mtime, the second trusts it as settled and
+# transcribes it (that two-observation rule is what keeps a half-copied 450 MB
+# recording from being read as complete)
+```
+
+It loads the models only if something is actually pending, stands down if the
+card has less than `--min-free-vram` GiB spare, and releases everything before
+exiting. To opt back into the schedule: `./setup-watcher.sh install` (undo with
+`./setup-watcher.sh uninstall`).
