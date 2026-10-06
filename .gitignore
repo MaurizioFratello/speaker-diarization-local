@@ -12,3 +12,11 @@ __pycache__/
 *.log
 .app.pid
 bench_*
+
+# watcher.py bookkeeping (regenerated automatically)
+data/transcripts/
+data/scratch/
+data/logs/
+data/watcher-state.json
+data/watcher-ledger.json
+data/watcher.lock
