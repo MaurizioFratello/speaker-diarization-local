@@ -990,9 +990,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ignore-open", action="store_true", help="skip the lsof write-holder check")
     ap.add_argument("--reset", action="store_true", help="forget all remembered state/ledger (re-scan from zero)")
     ap.add_argument("--progress-every", type=float, default=30.0, help="seconds between progress lines")
+    ap.add_argument("--verbose", action="store_true", default=None,
+                    help="print the summary even when there was nothing to do; a manual "
+                         "run should never be silent, an unattended tick should be")
     ap.add_argument("--min-free-vram", type=float, default=float(os.environ.get("SPEAKER_MIN_FREE_VRAM", "2.0")),
                     help="GiB that must be free before the models are loaded")
-    ap.add_argument("--max-other-util", type=int, default=int(os.environ.get("SPEAKER_MAX_OTHER_UTIL", "25")),
+    ap.add_argument("--max-other-util", type=int, default=int(os.environ.get("SPEAKER_MAX_OTHER_UTIL", "100")),
                     help="stand down instead of loading models when the GPU is busier than this % "
                          "(100 = never defer on utilization)")
     ap.add_argument("--gpu-time-limit", type=float, default=float(os.environ.get("SPEAKER_GPU_TIME_LIMIT", "480")),
@@ -1067,7 +1070,11 @@ def main(argv: list[str] | None = None) -> int:
                f"{n_done} already done")
     # A 3-minute timer is 480 ticks a day; when nothing has changed, repeating the
     # same idle line turns the log into noise where a real signal should stand out.
-    if todo or waiting_items or args.dry_run or not _idle_is_quiet(summary):
+    # An unattended tick that found nothing must not fill the journal; a run somebody
+    # asked for (--verbose, or a terminal in front of it) always says something, even
+    # when the answer is "nothing to do".
+    loud = args.verbose if args.verbose is not None else sys.stdout.isatty()
+    if todo or waiting_items or args.dry_run or loud or not _idle_is_quiet(summary):
         log(summary)
     for it in todo:
         log(f"  queued: {it['path'].name} ({it['size'] / 2**20:.0f} MiB)"

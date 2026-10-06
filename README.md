@@ -114,6 +114,7 @@ Prints `[{"text", "start", "end", "speaker"}, ...]` segments.
 | `exports.py` | Transcript renderers (md/txt/json/srt/vtt), stdlib-only by design |
 | `watcher.py` | One-shot folder scanner: transcribes what is new, then exits |
 | `setup-watcher.sh` | Installs/removes the systemd timer that runs `watcher.py` |
+| `transcribe-new.sh` | One click: transcribe what has no markdown yet, then release the GPU |
 | `static/index.html` | Single-page drag & drop UI (no external assets) |
 | `data/` | `uploads/` single-use scratch (wiped on boot); `results/` per-job transcripts (persist) |
 | `setup.sh` / `run.sh` / `setup.ps1` / `run.bat` | Linux/Windows launchers |
@@ -238,6 +239,22 @@ folder; the real `data/` and GPU are untouched):
   they are not identities. Max 8 speakers per file.
 - **Windows firewall prompt** on first run: allow it for localhost, or run with
   `--host 127.0.0.1` (default).
+
+### One-click script
+
+`transcribe-new.sh` is the whole job in one click — looks for audio in the folder
+that has no `Name.transcript.md` yet, transcribes those, writes the markdown
+beside them, and shows the GPU afterwards to prove it kept nothing:
+
+```bash
+./transcribe-new.sh                  # /mnt/nas/IFX/03_Music
+./transcribe-new.sh /path/to/folder  # or anywhere else
+```
+
+It is installed as an application launcher ("Transcribe New Recordings" in the
+app grid, and on the Desktop), so clicking it runs the same thing and reports the
+result in a dialog. `Terminal=false` on purpose: there is no terminal emulator on
+this machine. Each click logs to `data/logs/manual-<timestamp>.log`.
 
 ### Manual mode (what is installed here)
 
