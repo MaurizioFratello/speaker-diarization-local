@@ -240,7 +240,7 @@ class NemoOfflineEngine:
         if slot == "target_lang":
             from nemo.collections.asr.models.rnnt_bpe_models_prompt import RNNTPromptTranscribeConfig
 
-            value = language if language in ("auto", "") else _locale(language)
+            value = language if language in ("auto", "") else locale_tag(language)
             return {
                 "override_config": RNNTPromptTranscribeConfig(
                     # use_lhotse=False: with the lhotse path the prompt index is drawn
@@ -261,7 +261,11 @@ class NemoOfflineEngine:
                     f"{self.spec.label} has no built-in language detection, so it needs an "
                     "explicit language (--lang de). Use --asr balanced for auto-detection."
                 )
-            kwargs["source_lang"] = kwargs["target_lang"] = _locale(language)
+            # Canary's prompt slots take the bare code ("de"), which its formatter
+            # turns into <|de|>; the locale form ("de-DE") is not a known slot value
+            # and is dropped, and the checkpoint's own default is English — measured:
+            # passing "de-DE" produced a Swedish-flavoured transcript of German speech.
+            kwargs["source_lang"] = kwargs["target_lang"] = language
         elif language not in ("auto", "", self.language):
             raise EngineError(f"{self.spec.label} is not prompt-conditioned; cannot switch to {language!r}")
         if self.hotwords and self.spec.model_class == "MultiTask":
@@ -386,7 +390,7 @@ def _words(hyp, cut: Cut, frame_seconds: float, spec_label: str = "ASR") -> list
     return words
 
 
-def _locale(code: str) -> str:
+def locale_tag(code: str) -> str:
     """``de`` → ``de-DE`` (prompt tables are keyed by locale); longer codes pass through."""
     c = code.strip()
     if "-" in c:

@@ -11,7 +11,9 @@ __pycache__/
 # Runtime artifacts
 *.log
 .app.pid
-bench_*
+# benchmark output (the harness itself, bench_asr.py, is tracked)
+bench/
+*.bench.log
 
 # watcher.py bookkeeping (regenerated automatically)
 data/transcripts/
@@ -20,4 +22,3 @@ data/logs/
 data/watcher-state.json
 data/watcher-ledger.json
 data/watcher.lock
-bench/
