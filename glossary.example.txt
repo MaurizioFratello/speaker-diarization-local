@@ -32,6 +32,8 @@ MEMS	memz;meens;MEMSe
 E-Modul	Ebenmoduli;E Modul;E-Moduls
 !Modul;Module;Model
 Kraftsensor	Kraftsensori;Kraftssensor
+Dehnungsmessstreifen	Dänemessstreifen;Demessreifen;Denmehrstreifen;demerst Streifen;Dehnungs messstreifen
+stresskompensiert	Stress kompensieren;Stress-kompensiert
 Stresssensoren	Stress sensoren;Stresssensorien
 Motorrad	Motorrade
 SAP S/4HANA	SAP S4 HANA;S 4HANA;S4HANA
