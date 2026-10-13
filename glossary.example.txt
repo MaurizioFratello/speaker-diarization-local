@@ -1,0 +1,37 @@
+# Glossary for glossary.py — text-side "hotword" correction of ASR transcripts.
+# Parakeet TDT / Canary greedy decoding has no acoustic word boosting, so domain
+# vocabulary is repaired deterministically on the text instead. Every rewrite is
+# reported (from -> to + rule), never applied silently.
+#
+# Format: one entry per line, UTF-8.
+#   Canonical                       nothing to fix beyond the canonical itself
+#   Canonical<TAB>alias1;alias2     ";"-separated known-bad renderings
+# Blank lines and #-comments ignored. Canonical case is what gets written out,
+# so MEMS stays uppercase and Müller keeps the umlaut. A canonical doubles as an
+# implicit alias for its own normalised form ("mems" -> "MEMS", "e-modul" ->
+# "E-Modul"); aliases are matched case-insensitively, punctuation-tolerantly and
+# may be multi-word. The longest alias wins at a position. Keep aliases for
+# renderings fuzzy matching would miss, e.g. Ebenmoduli (ratio 0.75 against "emodul").
+#
+# Besides the aliases, one fuzzy rule applies per remaining token: ratio >= 0.78
+# against a single-word canonical, token length >= 4. A rewrite that would make
+# the word LONGER never fires fuzzily — measured on this repo's data/: at 0.78
+# the fuzzy pass fired 261 times and 246 of them were "module"/"Module"/"Modul"
+# -> "E-Modul" (ratios 0.83-0.91) in text that meant the plain word, while every
+# genuine fix here shortens or re-cases a token (Kraftsensori, Muller, memz).
+# Wanted lengthenings are therefore written as aliases, as "E Modul"/"E-Moduls"
+# below. Only list a word here if spelling it like the canonical is right in
+# every context: an entry claims the word.
+#
+# A "!" line claims nothing: it protects words from every rule, so an ordinary
+# German plural stays an ordinary plural next to a technical canonical. That is
+# the cheap safety valve -- raising the threshold would also kill real fixes.
+
+Müller	Muller;Mueller
+MEMS	memz;meens;MEMSe
+E-Modul	Ebenmoduli;E Modul;E-Moduls
+!Modul;Module;Model
+Kraftsensor	Kraftsensori;Kraftssensor
+Stresssensoren	Stress sensoren;Stresssensorien
+Motorrad	Motorrade
+SAP S/4HANA	SAP S4 HANA;S 4HANA;S4HANA
