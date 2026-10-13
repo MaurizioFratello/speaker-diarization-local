@@ -423,6 +423,20 @@ rejection, and a hallucination/repeat guard before text reaches the transcript.
   language the audio does not speak collapsed the English test clip to zero
   segments. Auto remains the default everywhere, and the README says why.
 
+### Co-tenancy, settled by measurement
+
+With the resident server holding 90-92 GiB of 98 GiB, the offline engines were
+admitted (2.3-3.7 GiB resident), then evicted *during decoding* on a 198 MiB
+activation tensor at 155 MiB free: the neighbour's reservation grows after our check
+passes, so no courtesy check can prevent it, only survive it. `BENCH_BATCH=4` shrank
+the activations and changed nothing, because whatever is left gets taken. A
+22-second clip did complete on CUDA; the 53-minute rows did not, so the risk scales
+with file length. The floors in `engines.vram_floor_gib()` are therefore weights +
+context + batch-16 activations (3.1/3.1/3.2/5.5 GiB, and 2.5 measured for `live`,
+which is the only engine small enough to have coexisted), and the run itself falls
+back rather than the load alone.
+
+
 ### Still open
 
 1. **Spoken language ID** for `quality` + `language=auto` (plan §11). Today
