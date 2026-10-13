@@ -134,6 +134,9 @@ class DiarizeFirst:
         )
         return info
 
+    #: Speaker index → display number, fixed by the diarization before any ASR runs.
+    _label_order: dict[int, int] = {}
+
     #: Seconds per diarization output frame. Read from the checkpoint at load();
     #: the default is this model's own value (10 ms — the label grid is upsampled
     #: from the 80 ms encoder frames), so the geometry stays honest without weights.
@@ -153,6 +156,12 @@ class DiarizeFirst:
         self._probs = self._activity(audio)
         try:
             runs = self._runs(self._probs)
+            # Speaker numbering is decided by the diarization alone, before any ASR:
+            # a partial publish must not renumber someone halfway through the file
+            # just because a long cut happened to be transcribed first.
+            self._label_order = {}
+            for run in sorted(runs, key=lambda r: r.t0):
+                self._label_order.setdefault(run.speaker, len(self._label_order))
             cuts = self._cuts(audio, runs)
             if os.environ.get("NEMODIAR_DEBUG"):
                 speech = float((self._probs > self.cfg.threshold).any(axis=1).mean()) * len(audio) / SAMPLE_RATE
@@ -306,7 +315,7 @@ class DiarizeFirst:
                 (text, t0, t1, speaker) for text, t0, t1 in _sentences(timeline, self.cfg) if text.strip()
             )
         segments.sort(key=lambda s: (s[1], s[2]))
-        order: dict[int, int] = {}
+        order: dict[int, int] = dict(self._label_order)
         for _, _, _, speaker in segments:
             order.setdefault(speaker, len(order))
         return [

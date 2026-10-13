@@ -410,3 +410,24 @@ def vram_floor_gib(asr: str | None) -> float:
     except EngineError:
         return 2.0
     return round(spec.weights_gib / 2 + 0.9, 1)
+
+
+def env(name: str, default: str | None = None) -> str | None:
+    """One deployment setting, read from ``SPEAKER_<NAME>``.
+
+    ``NEMODIAR_<NAME>`` is still honoured so an existing installation keeps working
+    unchanged. This lives in the light module (no torch, no NeMo) because the
+    watcher's GPU courtesy check has to consult it before importing anything heavy.
+    """
+    import os
+
+    return os.environ.get(f"SPEAKER_{name}") or os.environ.get(f"NEMODIAR_{name}") or default
+
+
+def asr_mode(asr_or_args=None) -> str:
+    """The engine to use: explicit value or ``--asr`` flag, then SPEAKER_ASR, then
+    ``balanced``. One precedence rule for app, watcher, CLI and library."""
+    value = getattr(asr_or_args, "asr", asr_or_args)
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return (env("ASR", "balanced") or "balanced").strip().lower()

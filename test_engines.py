@@ -45,6 +45,7 @@ def pipe(cfg=None, frame_len: float = 0.01) -> SA.DiarizeFirst:
     p.cfg = cfg or SA.SegCfg()
     p.frame_len = frame_len
     p._probs = None
+    p._label_order = {}
     return p
 
 

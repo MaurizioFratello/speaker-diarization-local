@@ -9,22 +9,66 @@ Built on the official NVIDIA stack:
 
 - Diarization: [`nvidia/Nemotron-3-Diarization`](https://huggingface.co/nvidia/Nemotron-3-Diarization)
   (Sortformer-family, up to 8 speakers, arrival-time ordered labels)
-- ASR: [`nvidia/nemotron-3.5-asr-streaming-0.6b`](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b)
-  (cache-aware streaming, 32 language locales, automatic language detection)
-- Coupled via NeMo Speech's `SpeakerTaggedASR` multitalker streaming pipeline
-  (per the model's [ASR integration guide](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md)),
-  vendored into [`pipeline.py`](pipeline.py).
+- ASR: one of the NVIDIA checkpoints in [`engines.py`](engines.py) — see
+  [Transcription engines](#transcription-engines)
 
-Nothing leaves your machine after the model weights are on disk (≈2.6 GB
-total, no HF token needed — both models are open-weight). If
-`models/Nemotron-3-Diarization.nemo` and
-`models/nemotron-3.5-asr-streaming-0.6b.nemo` exist, they are loaded locally;
-otherwise they are fetched once from the Hugging Face Hub and cached.
+Nothing leaves your machine after the model weights are on disk (no HF token
+needed, all open-weight). Anything in `models/*.nemo` is loaded from there;
+anything missing is fetched once from the Hugging Face Hub and cached.
+
+## Transcription engines
+
+Two ways to get from audio to speaker-attributed text. Pick one globally with
+`--asr` (or `SPEAKER_ASR` for the watcher); it is one setting, not a per-file choice.
+
+| `--asr` | ASR checkpoint | Diarization → ASR | Language | VRAM (bf16) |
+|---|---|---|---|---|
+| `live` | Nemotron 3.5 ASR Streaming 0.6B (2.3 GB) | coupled streaming ([official multitalker rail](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md), vendored in [`pipeline.py`](pipeline.py)) | detected (101 prompts) | ~1.7 GB |
+| `fast` | same weights, decoded offline | diarize first, ASR on the speaker cuts ([`segment_asr.py`](segment_asr.py)) | detected | ~2.0 GB |
+| **`balanced`** *(default)* | Parakeet TDT 0.6B v3 (2.5 GB, 25 languages) | diarize first | detected by the model | ~2.9 GB |
+| `quality` | Canary 1B v2 (6.4 GB) | diarize first | **must be given** (`--lang de`) | ~4.4 GB |
+| `german` | stt_de_fastconformer_hybrid_large_pc (3.8 GB) | diarize first | German only | ~2.1 GB |
+
+The `live` row is the original path: it emits partial text while the file is
+still being read, and because diarization and ASR share one streaming geometry
+it can put two simultaneous speakers in one line. Everything else runs
+**diarization first**, cuts the audio at speaker turns and transcribes each cut
+with a full-context offline model. That is what makes the stronger models
+usable — Parakeet and Canary are not cache-aware — and it buys cleaner sentences,
+far fewer 1–3 word fragments and lower word error rates (see
+[Benchmarks](#benchmarks)). What it costs: a word said by two people at once is
+given to the dominant speaker only, and progress arrives per speaker turn
+instead of per second. Both modes return the same
+`[{"text", "start", "end", "speaker"}]` contract, so the UI, the exports and the
+watched folder are unaffected by the choice.
+
+`fast` exists for the case "I already have the live weights, but I would rather
+have whole sentences than a live feed": the same checkpoint, decoded with
+context. It does not report word timestamps offline, so the timing of individual
+words is reconstructed from their position in the cut.
+
+**Automatic language detection**: `live`, `fast` and `balanced` need no
+language at all — the model detects it per utterance, which is what you want
+when a German meeting contains English technical terms. `quality` (Canary) is
+prompt-conditioned and refuses to guess: it exits with a message telling you to
+pass `--lang de` (or to use `--asr balanced`). A spoken-language identifier for
+the `auto`+`quality` combination is planned, see
+[docs/ASR-BACKENDS-PLAN.md](docs/ASR-BACKENDS-PLAN.md).
+
+**Vocabulary (all engines)**: `--glossary FILE` repairs domain words and names
+in the *text*, after decoding, with an audit trail (`grep` it in the job JSON
+under `corrections`). Greedy decoding in Parakeet/Canary has no acoustic word
+boost, so this is the lever for `Dehnungsmessstreifen` and company; see
+[glossary.example.txt](glossary.example.txt) and
+[docs/GLOSSARY.md](docs/GLOSSARY.md). Canary additionally accepts a
+`--hotwords` context hint, which is a soft biasing rather than a guarantee.
 
 ## Requirements
 
-- NVIDIA GPU (Ampere or newer: RTX 30/40/50, RTX PRO, A/L/H series) — tested with
-  ~2.5 GB VRAM. CPU fallback: `--device cpu`.
+- NVIDIA GPU (Ampere or newer: RTX 30/40/50, RTX PRO, A/L/H series) — 1.7–4.4 GB
+  VRAM depending on the engine (see the table). No GPU, or the card is busy?
+  Everything runs on CPU too (`--device cuda` degrades to CPU by itself when the
+  card has no room; see [Troubleshooting](#troubleshooting)).
 - Linux or Windows 10/11, 64-bit. Internet only needed for setup and once for
   model weights (see `models/` above).
 - No system ffmpeg, CUDA toolkit, or Python install needed (uv provides a
@@ -88,29 +132,51 @@ still work after restarts.
 
 ```
 python app.py --port 8765 --host 127.0.0.1 --device cuda|cpu --preload --open-browser
+              [--asr balanced] [--lang auto] [--glossary glossary.txt]
 ```
 
+`--asr`, `--lang` and `--glossary` are the global engine choice (see
+[Transcription engines](#transcription-engines)); they are read from
+`SPEAKER_ASR` / `SPEAKER_LANG` / `SPEAKER_GLOSSARY` when not given.
 
-- `NEMODIAR_ASR_BF16=0|1` pins the ASR weight precision; by default the app
-  auto-selects bf16 (eager decoder, ~1.2 GB less VRAM) when the GPU has less
-  than ~6 GB free, and fp32 (CUDA-graph decoder) otherwise.
-- `NEMODIAR_MAX_SPKS=1..8` env var caps speaker streams (lower = less VRAM).
+
+Deployment settings are environment variables, read in this order: CLI flag →
+`SPEAKER_*` → `NEMODIAR_*` (the older prefix, still honoured) → built-in default.
+`setup-watcher.sh` writes `SPEAKER_ASR`, `SPEAKER_LANG`, `SPEAKER_GLOSSARY` into
+the systemd unit, so there is one place to change the engine on a server.
+
+- `SPEAKER_ASR=live|fast|balanced|quality|german` — the global engine choice.
+- `SPEAKER_LANG=de` — for the engines without language detection (`quality`).
+- `SPEAKER_GLOSSARY=/path/glossary.txt`, `SPEAKER_HOTWORDS="…"`.
+- `SPEAKER_MAX_SPKS=1..8` caps speaker streams (lower = less VRAM; `live` mode only).
+- `SPEAKER_ASR_BF16=0|1` pins the ASR weight precision on the `live` path; by
+  default the app auto-selects bf16 (eager decoder, ~1.2 GB less VRAM) when the
+  GPU has less than ~6 GB free, and fp32 (CUDA-graph decoder) otherwise. The
+  offline engines always use bf16 on CUDA (fp16 where bf16 is missing).
 - `--host 0.0.0.0` to serve your LAN (keep it private; there is no auth).
 
 ## CLI (no browser)
 
 ```bash
-.venv/bin/python pipeline.py meeting.mp4 --json-out meeting.json
+.venv/bin/python pipeline.py meeting.mp4 --json-out meeting.json     --asr quality --lang de --glossary glossary.txt
 ```
 
-Prints `[{"text", "start", "end", "speaker"}, ...]` segments.
+Prints `[{"text", "start", "end", "speaker"}, ...]` segments. `--asr live`
+keeps the streaming path; `--device cpu` and `--batch-size N` are there for
+machines without a free GPU.
 
 ## Files
 
 | Path | Role |
 |---|---|
 | `app.py` | FastAPI server: upload, jobs, exports, media playback |
-| `pipeline.py` | NeMo diarization+ASR pipeline + ffmpeg pre-converter |
+| `pipeline.py` | both transcriber modes + ffmpeg pre-converter |
+| `engines.py` | offline ASR engines: checkpoint registry, timestamps, language prompts |
+| `segment_asr.py` | diarize-first: speaker runs, cuts, leak filtering, segment assembly |
+| `model_store.py` | loads `models/*.nemo` when present, otherwise the Hub |
+| `glossary.py` | text-side vocabulary repair (stdlib-only, no ML dependencies) |
+| `test_glossary.py` / `test_engines.py` | dependency-light test suites (`python test_engines.py`) |
+| `bench_asr.py` | engine benchmark: time, VRAM, fragmentation, CER (see [Benchmarks](#benchmarks)) |
 | `exports.py` | Transcript renderers (md/txt/json/srt/vtt), stdlib-only by design |
 | `watcher.py` | One-shot folder scanner: transcribes what is new, then exits |
 | `setup-watcher.sh` | Installs/removes the systemd timer that runs `watcher.py` |
@@ -143,7 +209,10 @@ timers stuck in `SubState=elapsed` and silently dead — verified live. A long r
 is never interrupted and ticks never pile up: a start job for an already-running
 oneshot is a no-op, and `watcher.py` takes a non-blocking lock so a second process
 exits at once instead of competing for the GPU. Config lives at the top of
-`setup-watcher.sh` (`WATCH_DIR`, `FORMATS`, `INTERVAL`, `MIN_AGE`, `EXTRA_ARGS`).
+`setup-watcher.sh` (`WATCH_DIR`, `FORMATS`, `INTERVAL`, `MIN_AGE`, `ASR`,
+`ASR_LANG`, `ASR_GLOSSARY`, `EXTRA_ARGS`). The watcher raises its own
+`MIN_FREE_VRAM` courtesy floor to whatever the selected engine needs, so
+`ASR=quality` waits for the card instead of loading 6 GB onto it and OOMing.
 
 Because the watched folder is a NAS share that FreeFileSync pushes into, a
 "new" file is not necessarily finished arriving, so the queue is gated:
@@ -236,9 +305,13 @@ folder; the real `data/` and GPU are untouched):
 
 ## Troubleshooting
 
-- **CUDA OOM** on first transcribe: ASR weights drop to bf16 automatically on
-  tight GPUs (`NEMODIAR_ASR_BF16=0|1` pins the choice). Still OOMing? Set
+- **CUDA OOM / card full**: the offline engines check the free VRAM before
+  loading and fall back to CPU (with a log line) rather than failing the job; on
+  `--asr live` the ASR weights drop to bf16 automatically on tight GPUs
+  (`NEMODIAR_ASR_BF16=0|1` pins the choice). Still OOMing? Set
   `NEMODIAR_MAX_SPKS=4` (or 2) — one ASR stream per detected speaker.
+- **`quality` refuses to start**: Canary has no language detection, so it wants
+  `--lang de` (etc.) instead of guessing. `--asr balanced` detects the language.
 - **Slow start**: first run downloads both checkpoints; afterwards the UI
   shows "Loading models" only until weights are cached.
 - **Wrong/merged speakers**: labels are per-file, ordered by first appearance;

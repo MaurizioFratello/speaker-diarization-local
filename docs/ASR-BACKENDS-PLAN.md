@@ -337,3 +337,61 @@ diarization stage we are deliberately keeping.
 * Local: `.deps/nemo-speech/nemo/collections/asr/parts/utils/multispk_transcribe_utils.py`
   (`SpeakerTaggedASR.perform_offline_stt_spk`, `merge_transcript_and_speakers`,
   `get_word_dict_content_offline`, `mask_features`, `validate_feature_frame_strides`)
+
+---
+
+## 16. What was built (2026-10-13)
+
+Shipped, in this order (each a separate commit, so any step can be reverted):
+
+| commit | content |
+|---|---|
+| `1db071a` | `model_store.py` — local `models/*.nemo` first, Hub as fallback |
+| `491c8c8` | `glossary.py` + 81-check suite — text-side vocabulary repair with an audit trail |
+| `bcf53e9` | `engines.py`, `segment_asr.py`, `pipeline.py` — the diarize-first mode and its four checkpoints |
+| `060e091` | `--asr/--lang/--glossary` through app, watcher and systemd unit |
+| `384db0e` | glossary aliases for the renderings this corpus really produced |
+
+Implemented as planned: one output contract, two pipeline shapes, one global
+engine setting, per-segment progress instead of per-second, dominance-window leak
+rejection, and a hallucination/repeat guard before text reaches the transcript.
+
+### Measured, not assumed
+
+- **Offline diarization works** with `spkcache_len=264, fifo_len=40, chunk_len=340,
+  chunk_right_context=40, spkcache_update_period=300` + `_check_streaming_parameters()`;
+  the probability grid arrives at 10 ms resolution (upsampled from 80 ms encoder
+  frames), which is fine-grained enough to attribute words to speakers.
+- **Speaker turns agree with the streaming path** on the same 3-minute clip:
+  turn points within 0.3–1.0 s, words per speaker 217/120 vs 212/128 — the
+  diarization half is not inventing a different conversation.
+- **The prompt checkpoint must be called with `use_lhotse=False`.** With the lhotse
+  path, the prompt index is read from `cut.supervisions[0].language`, which a bare
+  file list does not carry, so roughly half of every batch dies on
+  `Unknown prompt key: 'None'`. The published example uses
+  `override_config=RNNTPromptTranscribeConfig(...)`; it only works because that
+  bypasses the prompt dataset.
+- **`nemotron-3.5-asr-streaming-0.6b` exposes no word timestamps offline**
+  (`hyp.timestamp` empty with `timestamps=True`), so `fast` synthesises them.
+  The other three engines report real word and segment timestamps.
+- **A saturated GPU cannot even hand out a CUDA context** on this box (another
+  tenant holds 92 of 96 GiB), so the free-VRAM probe is wrapped: `--device cuda`
+  degrades to CPU with a log line instead of failing the job. The watcher's
+  courtesy floor is derived from the selected engine (`engines.vram_floor_gib`).
+- **Word offsets are local to the cut; the dominance window is in file time.**
+  Comparing them without the shift dropped the head of every cut after the first.
+  `test_engines.py` covers this and the rest of the geometry without loading a model.
+- **`difflib` autojunk is a trap for CER**: with the default, text that was 6 %
+  wrong scored 71 %. Either pass `autojunk=False` or use `jiwer`.
+
+### Still open
+
+1. **Spoken language ID** for `quality` + `language=auto` (plan §11). Today
+   `quality` refuses to guess, which is honest but a papercut; the design (hysteresis
+   over diarized speaker runs, `speechbrain/lang-id-voxlingua107-ecapa`) stands.
+2. **Tuning pass** on `SegCfg` (`pad`, `threshold`, `merge_gap`, `sent_break`) against
+   the benchmark; 0.15 s of context padding already visibly helps, `pad=0.35` may help more.
+3. **Acoustic biasing** (plan §13): n-gram CTC/flashlight LM or `decodercontext`
+   on Canary, instead of text-side repair only.
+4. **Overlap**: the dominant-speaker rule is a deliberate loss of the quieter
+   channel; source separation is the only way to recover it and is not planned.

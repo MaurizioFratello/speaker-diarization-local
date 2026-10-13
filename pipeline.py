@@ -51,7 +51,7 @@ from nemo.utils import logging as nemo_logging
 
 from dataclasses import replace
 
-from engines import EngineSpec, NemoOfflineEngine, resolve_spec
+from engines import EngineSpec, NemoOfflineEngine, asr_mode, env, resolve_spec
 from glossary import correct_segments, load_glossary_if_exists
 from model_store import MODELS_DIR, mirror_path  # re-exported: callers import these from here
 from model_store import load_nemo_model as _load_model
@@ -352,8 +352,8 @@ class Transcriber(GlossaryFix):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         map_location = torch.device(device)
-        if max_speakers is None and os.environ.get("NEMODIAR_MAX_SPKS"):
-            max_speakers = int(os.environ["NEMODIAR_MAX_SPKS"])
+        if max_speakers is None and env("MAX_SPKS"):
+            max_speakers = int(env("MAX_SPKS"))
 
         # Load weights on CPU first, then move/cast: avoids fp32 GPU spikes
         # and (with NEMODIAR_ASR_BF16=1) halves resident ASR memory.
@@ -377,9 +377,9 @@ class Transcriber(GlossaryFix):
         # mixed-precision safe: see TODO in NeMo label_looping_base). bf16 weights
         # halve VRAM but require disabling the CUDA-graph decoder.
         if asr_bf16 is None:
-            env = os.environ.get("NEMODIAR_ASR_BF16")
-            if env is not None:
-                asr_bf16 = env == "1"
+            pin = env("ASR_BF16")
+            if pin is not None:
+                asr_bf16 = pin == "1"
             elif map_location.type == "cuda":
                 # fp32 ASR weights (~2.4 GB) plus activations/graphs need ~6 GB free;
                 # on shared/constrained GPUs use bf16 + eager decoder instead.
@@ -585,11 +585,11 @@ class OfflineTranscriber(GlossaryFix):
         seg: SegCfg | None = None,
         diar_model: str = DIAR_MODEL_ID,
     ) -> None:
-        spec = resolve_spec(asr or os.environ.get("NEMODIAR_ASR", "balanced"))
+        spec = resolve_spec(asr_mode(asr))
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-        if max_speakers is None and os.environ.get("NEMODIAR_MAX_SPKS"):
-            max_speakers = int(os.environ["NEMODIAR_MAX_SPKS"])
+        if max_speakers is None and env("MAX_SPKS"):
+            max_speakers = int(env("MAX_SPKS"))
 
         device, dtype = _pick_device(spec, device)
         self._impl = DiarizeFirst(
@@ -598,14 +598,14 @@ class OfflineTranscriber(GlossaryFix):
                 device=device,
                 dtype=dtype,
                 batch_size=batch_size,
-                language=lang or os.environ.get("NEMODIAR_LANG", "auto"),
-                hotwords=hotwords or os.environ.get("NEMODIAR_HOTWORDS"),
+                language=lang or env("LANG", "auto"),
+                hotwords=hotwords or env("HOTWORDS"),
             ),
             diar_model=diar_model,
             device=device,
             cfg=replace(seg or SegCfg(), max_speakers=int(max_speakers or 8)),
         )
-        self._g = _open_glossary(glossary or os.environ.get("NEMODIAR_GLOSSARY"))
+        self._g = _open_glossary(glossary or env("GLOSSARY"))
         self.last_corrections = []
         self.device = torch.device(device)
 
@@ -678,7 +678,7 @@ def load_transcriber(
     batch_size: int = 16,
 ):
     """Build the transcriber for an ``--asr`` value (``live`` keeps the streaming path)."""
-    mode = (asr or os.environ.get("NEMODIAR_ASR", "balanced")).strip().lower()
+    mode = asr_mode(asr)
     if mode in ("live", "streaming", "coupled"):
         return Transcriber(device=device, max_speakers=max_speakers, glossary=glossary)
     return OfflineTranscriber(
@@ -702,7 +702,8 @@ if __name__ == "__main__":  # CLI smoke test: python pipeline.py audio.wav
     ap.add_argument("--max-speakers", type=int, default=None)
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--asr", default=None,
-                    help="live | fast | balanced | quality | german (default: $NEMODIAR_ASR)")
+                    help="live | fast | balanced | quality | german "
+                         "(default: $SPEAKER_ASR, alias $NEMODIAR_ASR)")
     ap.add_argument("--lang", default=None,
                     help="language code for engines that require one (e.g. de); default: auto")
     ap.add_argument("--hotwords", default=None,
