@@ -290,6 +290,12 @@ def run_job(job_id: str, src_path: Path, device: str | None, vad_full: bool = Fa
             partial=None, partial_speakers=None, progress=None, step=None,
         )
         job["corrections"] = list(getattr(tr, "last_corrections", []))
+        # The same provenance shape the watcher writes, so exports.py renders one line
+        # for both paths and a downloaded .md says which card or cores answered.
+        job["engine"] = {**(job.get("engine") or {}),
+                         **getattr(tr, "describe", lambda: {})(),
+                         "device": str(getattr(tr, "device", "")),
+                         "repairs": len(job["corrections"])}
         _save_result(job)
         _sweep_uploads(wav)
         (QUEUE_DIR / f"{job_id}.json").unlink(missing_ok=True)

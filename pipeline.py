@@ -303,19 +303,44 @@ class GlossaryFix:
     """
 
     _g = None
-    last_corrections: list[dict] = []
+
+    def _begin_fix_log(self) -> None:
+        """Fresh audit trail; called at the top of every transcribe()."""
+        self.last_corrections: list[dict] = []
+
+    def _record(self, changes: list[dict]) -> None:
+        """Append repairs, once each.
+
+        Accumulated rather than replaced, and deduplicated: the streaming path
+        corrects every partial it publishes, so the same repair is seen on each
+        update of one line and again in the final list. Replacing here is what made
+        a job report `corrections: null` for a transcript whose spelling *had* been
+        repaired — the publish pass fixed the text, so the final pass found nothing.
+        """
+        seen = {(c.get("start"), c["from"], c["to"]) for c in self.last_corrections}
+        for c in changes:
+            key = (c.get("start"), c["from"], c["to"])
+            if key not in seen:
+                seen.add(key)
+                self.last_corrections.append(c)
 
     def _publish(self, cb):
         if cb is None or self._g is None:
             return cb
-        return lambda step, partial: cb(step, correct_segments(partial, self._g)[0])
+
+        def send(step, partial):
+            fixed, changes = correct_segments(partial, self._g)
+            self._record(changes)
+            return cb(step, fixed)
+
+        return send
 
     def _fix(self, segs: list[dict]) -> list[dict]:
         """Correct finished segments; the audit trail lands in ``last_corrections``."""
         if self._g is None:
             return segs
         segs, changes = correct_segments(segs, self._g)
-        self.last_corrections = changes
+        self._record(changes)
         return segs
 
 
@@ -482,6 +507,7 @@ class Transcriber(GlossaryFix):
 
     @torch.inference_mode()
     def transcribe(self, wav_path: str | os.PathLike, publish=None, offset: float = 0.0) -> list[dict]:
+        self._begin_fix_log()
         wav_path = os.fspath(wav_path)
         if _is_silent_wav(wav_path):
             return []
@@ -644,6 +670,7 @@ class OfflineTranscriber(GlossaryFix):
 
     @torch.inference_mode()
     def transcribe(self, wav_path, publish=None, offset: float = 0.0) -> list[dict]:
+        self._begin_fix_log()
         if _is_silent_wav(os.fspath(wav_path)):
             return []
         try:

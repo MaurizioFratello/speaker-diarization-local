@@ -238,6 +238,27 @@ else:
     check(_ot.device.type == "cpu", "the engine reports the device that actually answered")
     check(len(_out) == 1 and _out[0]["speaker"] == "speaker_0", "segments still match the contract")
 
+    print("14) the audit trail counts a repair once, wherever it was applied")
+    import glossary as _gl
+
+    _g = _gl.parse_glossary("Dehnungsmessstreifen\tDänemessstreifen\n")
+    _tr = _pipe.Transcriber.__new__(_pipe.Transcriber)
+    _tr._g = _g
+    _tr._begin_fix_log()
+    _seen = []
+    _pub = _tr._publish(lambda step, partial: _seen.append([x["text"] for x in partial]))
+    _seg = lambda: [{"text": "Dänemessstreifen", "start": 1.0, "end": 2.0, "speaker": "speaker_0"}]
+    _pub(0, _seg())
+    _pub(1, _seg())                       # the same line, published again
+    _tr._fix([{"text": "Dänemessstreifen", "start": 1.0, "end": 2.0, "speaker": "speaker_0"}])
+    check(_seen == [["Dehnungsmessstreifen"], ["Dehnungsmessstreifen"]],
+          f"partials are corrected before the UI sees them: {_seen}")
+    check(len(_tr.last_corrections) == 1,
+          f"one repair, reported once — not zero (the old bug) and not three: "
+          f"{_tr.last_corrections}")
+    _tr._begin_fix_log()
+    check(_tr.last_corrections == [], "a second file starts with a clean trail")
+
 if FAILED:
     print(f"{FAILED} FAILURE(S)")
     sys.exit(1)
