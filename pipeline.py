@@ -1,15 +1,22 @@
 """Speaker-attributed transcription: who said WHAT, WHEN.
 
-Pipeline = NeMo Speech's official coupled streaming multitalker path,
-vendored/simplified from:
-  - NVIDIA-NeMo/Speech examples/asr/asr_cache_aware_streaming/
-      speech_to_text_multitalker_streaming_infer.py
-  - nvidia/Nemotron-3-Diarization ASR_INTEGRATION_GUIDE.md (Option 2)
+Two pipeline modes, one output contract ``[{"text", "start", "end", "speaker"}]``:
 
-Models (public, no HF token required):
-  - Diarization: nvidia/Nemotron-3-Diarization (Sortformer-family, 8 spk)
-  - ASR:         nvidia/nemotron-3.5-asr-streaming-0.6b (32 locales,
-                 language auto-detected via prompt)
+``live``
+  NeMo Speech's official coupled multitalker *streaming* path, vendored and
+  simplified from:
+    - NVIDIA-NeMo/Speech examples/asr/asr_cache_aware_streaming/
+        speech_to_text_multitalker_streaming_infer.py
+    - nvidia/Nemotron-3-Diarization ASR_INTEGRATION_GUIDE.md (Option 2)
+  Only a cache-aware streaming ASR fits that rail, so this mode is tied to
+  ``nvidia/nemotron-3.5-asr-streaming-0.6b``. It emits partial text while the
+  file is still being read and merges words spoken by two people at once.
+
+``fast`` / ``balanced`` / ``quality`` / ``german``  (see :mod:`engines`)
+  Diarization first (offline), then an offline ASR engine over the speaker cuts
+  (:mod:`segment_asr`). Better sentences, better accuracy, fewer parameters —
+  at the cost of overlap handling and of progress arriving per speaker turn
+  instead of per second.
 
 Input: mono 16 kHz wav (convert upstream with `prepare_audio`).
 Output: list of {"text", "start", "end", "speaker"} dicts, sorted by time.
@@ -42,26 +49,15 @@ from nemo.collections.asr.parts.utils.streaming_utils import (
 )
 from nemo.utils import logging as nemo_logging
 
-DIAR_MODEL_ID = "nvidia/Nemotron-3-Diarization"
-ASR_MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
+from dataclasses import replace
 
-# Optional local mirror: models/<repo-basename>.nemo used instead of Hub download.
-MODELS_DIR = Path(__file__).resolve().parent / "models"
+from engines import EngineSpec, NemoOfflineEngine, resolve_spec
+from glossary import correct_segments, load_glossary_if_exists
+from model_store import MODELS_DIR, mirror_path  # re-exported: callers import these from here
+from model_store import load_nemo_model as _load_model
+from segment_asr import DIAR_MODEL_ID, DiarizeFirst, SegCfg
 
-
-def _load_model(name: str, cls):
-    """Load a NeMo model (on CPU) from local ``models/`` mirror, explicit path, or HF Hub."""
-    if str(name).endswith(".nemo"):
-        path, src = Path(name), str(name)
-    else:
-        local = MODELS_DIR / f"{name.rstrip('/').split('/')[-1]}.nemo"
-        if local.is_file():
-            path, src = local, f"local mirror {local}"
-        else:
-            nemo_logging.info(f"Downloading {name} from Hugging Face Hub")
-            return cls.from_pretrained(model_name=name, map_location="cpu")
-    nemo_logging.info(f"Loading {src}")
-    return cls.restore_from(restore_path=str(path), map_location="cpu")
+ASR_MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"  # the ``live`` mode's ASR
 
 
 # Officially recommended settings for the Nemotron-3.5-ASR pairing
@@ -296,7 +292,46 @@ def trim_edge_silence(
         return wav_path, 0.0
 
 
-class Transcriber:
+class GlossaryFix:
+    """Text-side correction shared by both transcriber modes.
+
+    Subclasses set ``self._g`` (a :class:`glossary.Glossary`, or ``None``). A
+    glossary is a *text* concern, so it behaves identically no matter which
+    engine decoded the audio, and it is applied to published partials as well as
+    to the final list: the UI must never show a spelling the finished transcript
+    will disagree with.
+    """
+
+    _g = None
+    last_corrections: list[dict] = []
+
+    def _publish(self, cb):
+        if cb is None or self._g is None:
+            return cb
+        return lambda step, partial: cb(step, correct_segments(partial, self._g)[0])
+
+    def _fix(self, segs: list[dict]) -> list[dict]:
+        """Correct finished segments; the audit trail lands in ``last_corrections``."""
+        if self._g is None:
+            return segs
+        segs, changes = correct_segments(segs, self._g)
+        self.last_corrections = changes
+        return segs
+
+
+def _open_glossary(path: str | os.PathLike | None):
+    """Glossary for a CLI/env path, with a loud word when the path is wrong."""
+    if not path:
+        return None
+    g = load_glossary_if_exists(path)
+    if g is None:
+        nemo_logging.warning(f"glossary {path}: missing or empty, no corrections applied")
+    else:
+        nemo_logging.info(f"Glossary: {len(g)} entries from {path}")
+    return g
+
+
+class Transcriber(GlossaryFix):
     """Loads both models once; call .transcribe(wav_path) per file.
 
     Each call is an independent session: speaker labels (Speaker 0..7) are
@@ -310,6 +345,7 @@ class Transcriber:
         device: str | None = None,
         max_speakers: int | None = None,
         asr_bf16: bool | None = None,
+        glossary: str | os.PathLike | None = None,
     ) -> None:
         torch.set_float32_matmul_precision("high")
 
@@ -325,6 +361,9 @@ class Transcriber:
         self.diar_model = _load_model(diar_model, SortformerEncLabelModel)
         nemo_logging.info(f"Loading ASR model {asr_model}")
         self.asr_model: ASRModel = _load_model(asr_model, ASRModel)
+        self._asr_id = asr_model
+        self._g = _open_glossary(glossary)
+        self.last_corrections = []
 
         self.use_bf16 = (
             PIPELINE_CFG["use_amp"]
@@ -412,11 +451,33 @@ class Transcriber:
 
         self.device = map_location
 
+    def load(self):
+        """No-op for symmetry with :class:`OfflineTranscriber` (this path loads eagerly)."""
+        return self
+
+    def unload(self) -> None:
+        """No-op: the streaming path holds its weights for the process lifetime."""
+
+    def describe(self) -> dict:
+        """What this transcriber is made of (app status line + JSON metadata)."""
+        return {
+            "engine": "live",
+            "label": "Nemotron 3.5 ASR Streaming 0.6B",
+            "model": self._asr_id,
+            "language": "auto",
+            "language_detection": "model",
+            "timestamps": True,
+            "pipeline": "coupled streaming (multitalker)",
+            "diarization": DIAR_MODEL_ID,
+            "diarization_mode": "streaming (30.4 s buffer, 6.8 s hop)",
+        }
+
     @torch.inference_mode()
     def transcribe(self, wav_path: str | os.PathLike, publish=None, offset: float = 0.0) -> list[dict]:
         wav_path = os.fspath(wav_path)
         if _is_silent_wav(wav_path):
             return []
+        publish = self._publish(publish)
 
         cfg = self.cfg
         samples = [{"audio_filepath": wav_path}]
@@ -479,7 +540,7 @@ class Transcriber:
                     pass  # progress must never sink the run
 
         seglsts = streamer.generate_seglst_dicts_from_parallel_streaming(samples=samples)
-        return [self._normalize(seg, offset) for seg in seglsts]
+        return self._fix([self._normalize(seg, offset) for seg in seglsts])
 
     @staticmethod
     def _normalize(seg: dict, offset: float = 0.0) -> dict:
@@ -499,6 +560,138 @@ class Transcriber:
         }
 
 
+class OfflineTranscriber(GlossaryFix):
+    """Diarize-first mode: same call signature as :class:`Transcriber`.
+
+    ``asr`` picks the checkpoint (see ``engines.SPECS``); ``lang`` is ``auto`` or
+    a language code for the engines that cannot detect one. On a shared GPU the
+    engine runs in bf16 and drops to CPU when the card has no room for it — an
+    unattended watcher should degrade quietly, not OOM whatever else is resident.
+    """
+
+    #: seconds of processed audio per progress step (see ``DiarizeFirst.transcribe``)
+    chunk_step_sec = 1.0
+
+    def __init__(
+        self,
+        asr: str | None = None,
+        *,
+        lang: str | None = None,
+        device: str | None = None,
+        max_speakers: int | None = None,
+        hotwords: str | None = None,
+        glossary: str | os.PathLike | None = None,
+        batch_size: int = 16,
+        seg: SegCfg | None = None,
+        diar_model: str = DIAR_MODEL_ID,
+    ) -> None:
+        spec = resolve_spec(asr or os.environ.get("NEMODIAR_ASR", "balanced"))
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if max_speakers is None and os.environ.get("NEMODIAR_MAX_SPKS"):
+            max_speakers = int(os.environ["NEMODIAR_MAX_SPKS"])
+
+        device, dtype = _pick_device(spec, device)
+        self._impl = DiarizeFirst(
+            NemoOfflineEngine(
+                spec,
+                device=device,
+                dtype=dtype,
+                batch_size=batch_size,
+                language=lang or os.environ.get("NEMODIAR_LANG", "auto"),
+                hotwords=hotwords or os.environ.get("NEMODIAR_HOTWORDS"),
+            ),
+            diar_model=diar_model,
+            device=device,
+            cfg=replace(seg or SegCfg(), max_speakers=int(max_speakers or 8)),
+        )
+        self._g = _open_glossary(glossary or os.environ.get("NEMODIAR_GLOSSARY"))
+        self.last_corrections = []
+        self.device = torch.device(device)
+
+    def load(self):
+        """Load diarization + ASR, degrading to CPU if the GPU has no room for it.
+
+        An OOM here would otherwise cost a whole unattended watch cycle, and this
+        box shares one card with whoever else is on it. NeMo wraps the OOM of a
+        multi-model checkpoint in a plain RuntimeError, so the message is matched.
+        """
+        try:
+            self._impl.load()
+        except Exception as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            torch.cuda.empty_cache()
+            nemo_logging.warning(
+                f"{self._impl.engine.spec.label}: CUDA out of memory, reloading on CPU"
+            )
+            self._impl.engine.unload()
+            self._impl.unload()
+            self._impl.engine.device, self._impl.engine.dtype = "cpu", torch.float32
+            self._impl.device = "cpu"
+            self._impl.load()
+            self.device = torch.device("cpu")
+        return self
+
+    def unload(self) -> None:
+        self._impl.unload()
+
+    def describe(self) -> dict:
+        return self._impl.describe()
+
+    @torch.inference_mode()
+    def transcribe(self, wav_path, publish=None, offset: float = 0.0) -> list[dict]:
+        if _is_silent_wav(os.fspath(wav_path)):
+            return []
+        return self._fix(self._impl.transcribe(
+            os.fspath(wav_path), publish=self._publish(publish), offset=offset
+        ))
+
+
+def _pick_device(spec: EngineSpec, device: str) -> tuple[str, Any]:
+    """Return ``(device, dtype)``, degrading cuda -> cpu rather than fighting for VRAM."""
+    if not device.startswith("cuda") or not torch.cuda.is_available():
+        return "cpu", torch.float32
+    try:
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        free_gb = torch.cuda.mem_get_info()[0] / 2**30
+    except Exception as exc:  # a saturated card cannot even give us a context
+        nemo_logging.warning(f"CUDA unusable ({exc.__class__.__name__}: {exc}) — running on CPU")
+        return "cpu", torch.float32
+    need_gb = spec.weights_gib / (2 if dtype == torch.bfloat16 else 1) + 0.8
+    if free_gb < need_gb:
+        nemo_logging.warning(
+            f"{spec.label}: {free_gb:.1f} GiB free, {need_gb:.1f} GiB needed — running on CPU"
+        )
+        return "cpu", torch.float32
+    return "cuda", dtype
+
+
+def load_transcriber(
+    asr: str | None = None,
+    *,
+    device: str | None = None,
+    lang: str | None = None,
+    max_speakers: int | None = None,
+    hotwords: str | None = None,
+    glossary: str | os.PathLike | None = None,
+    batch_size: int = 16,
+):
+    """Build the transcriber for an ``--asr`` value (``live`` keeps the streaming path)."""
+    mode = (asr or os.environ.get("NEMODIAR_ASR", "balanced")).strip().lower()
+    if mode in ("live", "streaming", "coupled"):
+        return Transcriber(device=device, max_speakers=max_speakers, glossary=glossary)
+    return OfflineTranscriber(
+        mode,
+        device=device,
+        lang=lang,
+        max_speakers=max_speakers,
+        hotwords=hotwords,
+        glossary=glossary,
+        batch_size=batch_size,
+    )
+
+
 if __name__ == "__main__":  # CLI smoke test: python pipeline.py audio.wav
     import argparse
     import json
@@ -508,11 +701,24 @@ if __name__ == "__main__":  # CLI smoke test: python pipeline.py audio.wav
     ap.add_argument("--device", default=None, help="cuda / cpu")
     ap.add_argument("--max-speakers", type=int, default=None)
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--asr", default=None,
+                    help="live | fast | balanced | quality | german (default: $NEMODIAR_ASR)")
+    ap.add_argument("--lang", default=None,
+                    help="language code for engines that require one (e.g. de); default: auto")
+    ap.add_argument("--hotwords", default=None,
+                    help="context-biasing hint for engines that support it (Canary)")
+    ap.add_argument("--glossary", default=None,
+                    help="file of canonical spellings to repair in the output")
+    ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--no-vad-trim", action="store_true",
                     help="disable Silero VAD trimming of leading/trailing silence")
     args = ap.parse_args()
 
-    t = Transcriber(device=args.device, max_speakers=args.max_speakers)
+    t = load_transcriber(
+        args.asr, device=args.device, lang=args.lang, max_speakers=args.max_speakers,
+        hotwords=args.hotwords, glossary=args.glossary, batch_size=args.batch_size,
+    )
+    print(f"pipeline: {t.describe()}", flush=True)
     work = Path(args.audio).stem + ".16k.wav"
     converted = not str(args.audio).endswith(".16k.wav")
     wav = prepare_audio(args.audio, work) if converted else args.audio
