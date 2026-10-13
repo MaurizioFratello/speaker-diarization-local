@@ -416,8 +416,12 @@ def vram_floor_gib(asr: str | None) -> float:
     try:
         spec = resolve_spec(asr_mode(asr))   # None/'' -> SPEAKER_ASR -> default
     except EngineError:
-        return 2.0
-    return round(spec.weights_gib / 2 + 0.9, 1)
+        return 2.5   # `live`: measured 1.69 GiB allocator peak plus its CUDA context
+    # + 2.0, not + 0.9: the fast engine loaded its 1.1 GiB of bf16 weights onto a card
+    # with 2.5 GiB free, and then died mid-decode moving a 198 MiB activation tensor
+    # while another tenant grew into the rest. Weights alone under-prices a batch of
+    # 16 cuts; lower ``batch_size`` if you need the floor lower.
+    return round(spec.weights_gib / 2 + 2.0, 1)
 
 
 def env(name: str, default: str | None = None) -> str | None:

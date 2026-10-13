@@ -195,6 +195,49 @@ check(any(s["speaker"] == "speaker_1" and "Erstens" in s["text"] for s in segs3)
       "speaker 0's words carry the precomputed label 1")
 
 print()
+
+try:
+    import pathlib
+    import tempfile
+    import types as _t
+    import wave as _wave
+
+    import torch as _torch
+
+    import pipeline as _pipe
+except ImportError as _exc:          # the rest of this file deliberately avoids torch
+    print(f'13) mid-decode OOM retry: skipped ({_exc})')
+else:
+    print("13) a mid-decode CUDA OOM degrades the run, not just the load")
+    _wav = pathlib.Path(tempfile.mkdtemp()) / "a.wav"
+    with _wave.open(str(_wav), "w") as _w:
+        _w.setnchannels(1); _w.setsampwidth(2); _w.setframerate(16000)
+        _w.writeframes(b"\x01\x80" * 8000)
+
+    class _Impl:
+        engine = _t.SimpleNamespace(spec=_t.SimpleNamespace(label="stub"), device="cuda", dtype=None)
+        device = "cuda"
+        calls = 0
+
+        def unload(self):
+            pass
+
+        def transcribe(self, path, publish=None, offset=0.0):
+            _Impl.calls += 1
+            if _Impl.calls == 1:
+                raise RuntimeError("CUDA out of memory. Tried to allocate 198.00 MiB.")
+            return [{"text": "zwei woerte", "start": 0.0, "end": 1.0, "speaker": "speaker_0"}]
+
+    _ot = _pipe.OfflineTranscriber.__new__(_pipe.OfflineTranscriber)
+    _ot._impl = _Impl()
+    _ot._g = None
+    _ot.last_corrections = []
+    _ot.device = _torch.device("cuda")
+    _out = _ot.transcribe(_wav)
+    check(_Impl.calls == 2, f"the file was retried once after the OOM (calls={_Impl.calls})")
+    check(_ot.device.type == "cpu", "the engine reports the device that actually answered")
+    check(len(_out) == 1 and _out[0]["speaker"] == "speaker_0", "segments still match the contract")
+
 if FAILED:
     print(f"{FAILED} FAILURE(S)")
     sys.exit(1)

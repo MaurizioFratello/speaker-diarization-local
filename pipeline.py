@@ -629,16 +629,11 @@ class OfflineTranscriber(GlossaryFix):
         except Exception as exc:
             if "out of memory" not in str(exc).lower():
                 raise
-            torch.cuda.empty_cache()
             nemo_logging.warning(
                 f"{self._impl.engine.spec.label}: CUDA out of memory, reloading on CPU"
             )
-            self._impl.engine.unload()
-            self._impl.unload()
-            self._impl.engine.device, self._impl.engine.dtype = "cpu", torch.float32
-            self._impl.device = "cpu"
+            self._reload_on_cpu()
             self._impl.load()
-            self.device = torch.device("cpu")
         return self
 
     def unload(self) -> None:
@@ -651,9 +646,38 @@ class OfflineTranscriber(GlossaryFix):
     def transcribe(self, wav_path, publish=None, offset: float = 0.0) -> list[dict]:
         if _is_silent_wav(os.fspath(wav_path)):
             return []
-        return self._fix(self._impl.transcribe(
-            os.fspath(wav_path), publish=self._publish(publish), offset=offset
-        ))
+        try:
+            segs = self._impl.transcribe(
+                os.fspath(wav_path), publish=self._publish(publish), offset=offset
+            )
+        except Exception as exc:
+            # A model that fitted at load time can still be pushed over by somebody
+            # else's process while it decodes: measured with NeMo moving a
+            # normalisation tensor to the card mid-run ("Tried to allocate 198.00
+            # MiB", 155 MiB free, another process holding 90 GiB). A load-time
+            # fallback alone would leave an unattended watcher failing the same file
+            # on every tick, so the run itself degrades: drop the card, redo it on
+            # CPU, and tell the caller which device answered.
+            if self.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                raise
+            nemo_logging.warning(
+                f"{self._impl.engine.spec.label}: CUDA out of memory while decoding, "
+                f"retrying this file on CPU")
+            self._reload_on_cpu()
+            segs = self._impl.transcribe(
+                os.fspath(wav_path), publish=self._publish(publish), offset=offset
+            )
+        return self._fix(segs)
+
+    def _reload_on_cpu(self) -> None:
+        """Release the card and move this engine's models to CPU."""
+        import torch as _torch
+
+        self._impl.unload()
+        _torch.cuda.empty_cache()
+        self._impl.engine.device, self._impl.engine.dtype = "cpu", _torch.float32
+        self._impl.device = "cpu"
+        self.device = _torch.device("cpu")
 
 
 def _pick_device(spec: EngineSpec, device: str) -> tuple[str, Any]:
@@ -666,7 +690,7 @@ def _pick_device(spec: EngineSpec, device: str) -> tuple[str, Any]:
     except Exception as exc:  # a saturated card cannot even give us a context
         nemo_logging.warning(f"CUDA unusable ({exc.__class__.__name__}: {exc}) — running on CPU")
         return "cpu", torch.float32
-    need_gb = spec.weights_gib / (2 if dtype == torch.bfloat16 else 1) + 0.8
+    need_gb = spec.weights_gib / (2 if dtype == torch.bfloat16 else 1) + 2.0
     if free_gb < need_gb:
         nemo_logging.warning(
             f"{spec.label}: {free_gb:.1f} GiB free, {need_gb:.1f} GiB needed — running on CPU"
