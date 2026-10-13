@@ -956,14 +956,15 @@ def gpu_deferral_reason(args, *, include_util: bool = True) -> str | None:
         # see the card has the priority exactly backwards for this watcher.
         return ("nvidia-smi did not answer, so the state of the card is unknown "
                 "(driver busy, or the query timed out)")
-    from engines import asr_mode, vram_floor_gib   # light: no torch, no NeMo
+    from engines import vram_floor_gib   # light: no torch, no NeMo
     # getattr: --asr is on this tool's parser, but gpu_deferral_reason is also called
     # with older flag sets (tests, a unit file written before the option existed).
-    asr = getattr(args, "asr", None)
-    if asr_mode(asr) != "live":
-        # The 2.5 GiB floor was sized for `live`; the offline engines need more, and a
-        # courtesy guard that is too low just converts a wait into an OOM.
-        args.min_free_vram = max(args.min_free_vram, vram_floor_gib(asr))
+    if getattr(args, "min_free_vram", None) is None:
+        # Unset means "whatever the engine I am about to load needs", which is the only
+        # floor that is right for all five. An explicit number — including 0, meaning
+        # "I own this box, load anyway" — is honoured as given, because a guard that
+        # silently raises a value the operator typed is a guard you cannot turn off.
+        args.min_free_vram = vram_floor_gib(getattr(args, "asr", None))
     if free_gb < args.min_free_vram:
         return f"only {free_gb:.1f} GiB of VRAM free, {args.min_free_vram:.1f} GiB needed"
     if include_util and util is not None and util > args.max_other_util:
@@ -1076,8 +1077,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verbose", action="store_true", default=None,
                     help="print the summary even when there was nothing to do; a manual "
                          "run should never be silent, an unattended tick should be")
-    ap.add_argument("--min-free-vram", type=float, default=float(os.environ.get("SPEAKER_MIN_FREE_VRAM", "2.0")),
-                    help="GiB that must be free before the models are loaded")
+    ap.add_argument("--min-free-vram", type=float,
+                    default=(float(os.environ["SPEAKER_MIN_FREE_VRAM"])
+                             if os.environ.get("SPEAKER_MIN_FREE_VRAM") else None),
+                    help="GiB that must be free before models load (default: what the "
+                         "selected engine needs — 2.5 GiB for live, 3.1 for fast/balanced, "
+                         "5.5 for quality; 0 disables the guard)")
     ap.add_argument("--max-other-util", type=int, default=int(os.environ.get("SPEAKER_MAX_OTHER_UTIL", "100")),
                     help="stand down instead of loading models when the GPU is busier than this % "
                          "(100 = never defer on utilization)")

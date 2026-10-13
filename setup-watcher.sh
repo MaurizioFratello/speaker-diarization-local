@@ -19,7 +19,7 @@ INTERVAL="3"                                  # minutes between scans
 MIN_AGE="180"                               # seconds a file must be unchanged
 APP_PORT="8765"                             # your web app's port; while it serves, the watcher waits
 MOUNT_WAIT="25"                             # seconds to wait for the share at boot before standing down
-MIN_FREE_VRAM="2.0"                         # GiB that must be free before models load
+MIN_FREE_VRAM=""                              # GiB free before models load; empty = derive from ASR
                                            # (raised automatically for the bigger --asr engines)
 # Utilisation is deliberately NOT a gate by default (100 = ignore it). On a box with a
 # resident inference server it is meaningless: nvidia-smi reads 0 % between requests and
@@ -83,7 +83,7 @@ Environment=SPEAKER_APP_PORT=${APP_PORT}
 # bounded daemon thread instead of hanging in an uninterruptible stat(), and
 # the GPU thresholds below keep it off the card while you are using it.
 Environment=SPEAKER_MOUNT_WAIT=${MOUNT_WAIT}
-Environment=SPEAKER_MIN_FREE_VRAM=${MIN_FREE_VRAM}
+${MIN_FREE_VRAM:+Environment=SPEAKER_MIN_FREE_VRAM=${MIN_FREE_VRAM}}
 Environment=SPEAKER_MAX_OTHER_UTIL=${MAX_OTHER_UTIL}
 Environment=SPEAKER_GPU_TIME_LIMIT=${GPU_TIME_LIMIT}
 Environment=SPEAKER_ASR=${ASR}

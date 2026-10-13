@@ -358,11 +358,13 @@ check(n == 1, "--max-other-util 100 disables the advisory utilisation guard")
 # 4.0 GiB is enough for the default engine's floor (balanced: 3.1); the utilisation
 # check above must not accidentally become a VRAM check.
 watcher.gpu_state = lambda: (4.0, 0)
-d, f, n = tq(min_free_vram=0.0, max_other_util=100, asr="quality")
+d, f, n = tq(min_free_vram=None, max_other_util=100, asr="quality")
 check(d == 0 and n == 0,
-      "the floor follows the engine: quality needs 5.5 GiB, so 4 GiB is not an invitation")
-d, f, n = tq(min_free_vram=0.0, max_other_util=100, asr="live")
-check(d == 1, "live is admitted at the same free memory")
+      "an unset floor follows the engine: quality needs 5.5 GiB, so 4 GiB is no invitation")
+d, f, n = tq(min_free_vram=None, max_other_util=100, asr="live")
+check(d == 1, "live is admitted at the same free memory (its floor is 2.5 GiB)")
+d, f, n = tq(min_free_vram=0.0, max_other_util=100, asr="quality")
+check(d == 1, "an explicit 0 turns the guard off, even for the largest engine")
 
 # A batch that opened the gate while the card was idle must run to the end of the
 # queue even if utilisation climbs: sglang idles at 0 % and sits at ~95 % while

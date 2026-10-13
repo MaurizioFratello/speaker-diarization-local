@@ -626,6 +626,11 @@ class OfflineTranscriber(GlossaryFix):
             max_speakers = int(env("MAX_SPKS"))
 
         device, dtype = _pick_device(spec, device)
+        # "ran on cpu" is ambiguous without this: it happens both when the gate
+        # refuses up front and when a co-resident process evicts us mid-file, and the
+        # two call for different answers (a smaller batch vs. a smaller job).
+        self.cuda_note = getattr(_pick_device, "note", None) if device == "cpu" else None
+        _pick_device.note = None
         self._impl = DiarizeFirst(
             NemoOfflineEngine(
                 spec,
@@ -655,6 +660,7 @@ class OfflineTranscriber(GlossaryFix):
         except Exception as exc:
             if "out of memory" not in str(exc).lower():
                 raise
+            self.cuda_note = ("refused at load: " + " ".join(str(exc).split())[:160])
             nemo_logging.warning(
                 f"{self._impl.engine.spec.label}: CUDA out of memory, reloading on CPU"
             )
@@ -671,6 +677,10 @@ class OfflineTranscriber(GlossaryFix):
     @torch.inference_mode()
     def transcribe(self, wav_path, publish=None, offset: float = 0.0) -> list[dict]:
         self._begin_fix_log()
+        # Preserve an init/load refusal for the benchmark row; a per-file CUDA OOM
+        # below will replace it with the more specific mid-decode reason.
+        if self.device.type == "cuda":
+            self.cuda_note = None
         if _is_silent_wav(os.fspath(wav_path)):
             return []
         try:
@@ -687,6 +697,7 @@ class OfflineTranscriber(GlossaryFix):
             # CPU, and tell the caller which device answered.
             if self.device.type != "cuda" or "out of memory" not in str(exc).lower():
                 raise
+            self.cuda_note = ("evicted mid-decode: " + " ".join(str(exc).split())[:160])
             nemo_logging.warning(
                 f"{self._impl.engine.spec.label}: CUDA out of memory while decoding, "
                 f"retrying this file on CPU")
@@ -715,13 +726,14 @@ def _pick_device(spec: EngineSpec, device: str) -> tuple[str, Any]:
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         free_gb = torch.cuda.mem_get_info()[0] / 2**30
     except Exception as exc:  # a saturated card cannot even give us a context
+        _pick_device.note = f"CUDA unusable ({exc.__class__.__name__})"
         nemo_logging.warning(f"CUDA unusable ({exc.__class__.__name__}: {exc}) — running on CPU")
         return "cpu", torch.float32
     need_gb = spec.weights_gib / (2 if dtype == torch.bfloat16 else 1) + 2.0
     if free_gb < need_gb:
-        nemo_logging.warning(
-            f"{spec.label}: {free_gb:.1f} GiB free, {need_gb:.1f} GiB needed — running on CPU"
-        )
+        reason = f"{free_gb:.2f} GiB free, {need_gb:.1f} GiB needed"
+        _pick_device.note = f"declined at the gate: {reason}"
+        nemo_logging.warning(f"{spec.label}: {reason} — running on CPU")
         return "cpu", torch.float32
     return "cuda", dtype
 

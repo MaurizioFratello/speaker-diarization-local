@@ -93,6 +93,7 @@ wall = time.time() - t1
 peak = torch.cuda.max_memory_allocated(tr.device) / 2**30 if tr.device.type == "cuda" else 0.0
 free = torch.cuda.mem_get_info()[0] / 2**30 if tr.device.type == "cuda" else 0.0
 json.dump({"config": sys.argv[1], "device": sys.argv[2],
+           "cuda_note": getattr(tr, "cuda_note", None),
            "segments": segs, "load_s": load, "wall_s": wall, "peak_gib": peak,
            "device_used": tr.device.type,
            "free_gib_after": free, "describe": tr.describe(), "audio_s": audio_s},
@@ -134,6 +135,7 @@ def _stats(row: dict) -> dict:
         # a usable row.json on disk without these fields, which then blew up here.
         "config": row.get("config", "?"), "device": row.get("device", "?"),
         "device_used": row.get("device_used", row["device"]),
+        "cuda_note": row.get("cuda_note"),
         "audio_s": round(row.get("audio_s", 0), 1),
         "load_s": round(row.get("load_s", 0), 1),
         "wall_s": round(row.get("wall_s", 0), 1),
@@ -231,7 +233,7 @@ def main() -> int:
         print(json.dumps(st), flush=True)
 
     (out / "summary.json").write_text(json.dumps(rows, indent=1))
-    cols = ("config", "device", "device_used", "audio_s", "load_s", "wall_s", "rtf",
+    cols = ("config", "device", "device_used", "cuda_note", "audio_s", "load_s", "wall_s", "rtf",
             "peak_gib", "segs", "words", "words_per_seg", "pct_short", "cer", "speakers")
     print("\n" + "  ".join(f"{c[:9]:>9}" for c in cols))
     for r in rows:

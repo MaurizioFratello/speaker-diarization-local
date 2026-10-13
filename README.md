@@ -161,6 +161,11 @@ the systemd unit, so there is one place to change the engine on a server.
   the output collapse to nothing there, so leave it at `auto` for mixed meetings.
 - `SPEAKER_GLOSSARY=/path/glossary.txt`, `SPEAKER_HOTWORDS="…"`.
 - `SPEAKER_MAX_SPKS=1..8` caps speaker streams (lower = less VRAM; `live` mode only).
+- `SPEAKER_MIN_FREE_VRAM` / `--min-free-vram` is **unset by default**, which means
+  "whatever the selected engine needs" (2.5 GiB for `live`, 3.1 for `fast`/`balanced`,
+  3.2 for `german`, 5.5 for `quality`). Set a number to override that judgement, and `0`
+  to load regardless of the card — a guard you cannot turn off is not a courtesy. The
+  floor is weights + context + activations, so a smaller `--batch-size` lowers it.
 - `SPEAKER_ASR_BF16=0|1` pins the ASR weight precision on the `live` path; by
   default the app auto-selects bf16 (eager decoder, ~1.2 GB less VRAM) when the
   GPU has less than ~6 GB free, and fp32 (CUDA-graph decoder) otherwise. The
@@ -365,6 +370,8 @@ English technical vocabulary, the room reverberant and the vocabulary hostile
 | `fast` | cpu | cpu | 207 s | 0.064 | 22 s | – | 293 | 16.5 | 9 % | 0.074 | 5 |
 | `live` | cpu | cpu | 886 s | 0.275 | 22 s | – | 400 | 12.7 | 17 % | 0.088 | 4 |
 | `live` | cuda | cuda | **64 s** | **0.020** | 25 s | 1.69 GiB | 393 | 12.9 | 19 % | 0.085 | 4 |
+| `balanced` | cuda | **cuda** (3-min clip) | 9.3 s | 0.052 | 6 s | **3.15 GiB** | 34 | 10.0 | 18 % | 0.030 | – |
+| `balanced` | cuda | → cpu (53-min file, 4 attempts) | 97–229 s | 0.030–0.071 | 6 s | evicted | 404 | 12.3 | 16 % | 0.054 | – |
 
 RTF is wall seconds per audio second, so `balanced` on CPU turns a 53-minute
 interview into a transcript in two minutes — 25× faster than playback on cores that
@@ -398,9 +405,15 @@ evicted, or both:
   mid-decode on a 198 MiB activation tensor with 155 MiB left, because the neighbour's
   reservation *grew* after our check. Those rows completed on CPU at 164–317 s, i.e.
   they paid 40–110 s for the failed attempt.
-- Length is the risk factor: a 22-second clip on `balanced` loaded and finished on the
-  GPU at 4 GiB free without incident, while the 53-minute rows were evicted partway.
-  The longer the file, the likelier a neighbour is to grow into the gap.
+- **Length decides it.** `balanced` on the GPU: a 3-minute clip loaded (3.15 GiB
+  resident), decoded and finished on the card, producing the same 34 segments and
+  within 4 words of the same transcript as the CPU run — a useful sanity check on the
+  bf16 path. The 53-minute file was attempted four times at two batch sizes and landed
+  on CPU every time, at 97–229 s versus 126 s for a run that never tried the card: the
+  failed attempt is pure overhead, and the window for the neighbour to grow into the gap
+  grows with the file.
+- The arithmetic is tight rather than broken: the resident LLM leaves ~4.5 GiB of the
+  98 GiB card and dips to ~2.9 GiB while it serves, and `balanced` occupies 3.15 GiB.
 - The floor each engine needs is therefore weights + activations, not weights alone:
   3.1 GiB for `fast`/`balanced`, 3.2 for `german`, 5.5 for `quality`, and 2.5 measured
   for `live` — which is why `live` is the only engine that coexisted.
@@ -412,7 +425,10 @@ evicted, or both:
 Practical consequence: on a machine where a large model holds the card, run these
 engines on CPU (RTF 0.03–0.13) or run the transcript before starting that model. The
 code no longer cares which way it goes — the engine that loses the card mid-file
-finishes the file on CPU and reports the device that answered.
+finishes the file on CPU and reports the device that answered, along with a `cuda_note`
+saying whether it was `declined at the gate`, `refused at load` or `evicted mid-decode`.
+Those three want different responses (a bigger gap, a smaller batch, a shorter job), and
+for two rounds of this benchmark a row that only said `cpu` could not tell them apart.
 
 ## Troubleshooting
 
