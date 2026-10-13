@@ -2,8 +2,8 @@
 
 Drop an audio/video file in the browser, get a speaker-attributed transcript
 ("who said what, when"), rendered on a timeline with exports.
-Everything runs locally on GPU via NeMo (Nemotron-3-Diarization +
-Nemotron-3.5-ASR). Start with:  python app.py  [--port 8765] [--device cuda]
+Diarization and ASR run locally via NeMo; model choice is configurable with
+``--asr``. Start with:  python app.py  [--port 8765] [--device cuda]
 """
 
 from __future__ import annotations

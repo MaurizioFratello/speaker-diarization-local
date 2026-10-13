@@ -62,7 +62,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>🎙️ Speaker Transcript <span class="sub">local GPU · Nemotron-3-Diarization + Nemotron-3.5-ASR</span></h1>
+  <h1>🎙️ Speaker Transcript <span class="sub" id="engineSubtitle">Local speaker diarization · loading ASR details…</span></h1>
   <div id="drop">Drop audio / video files here, or click to choose.<br><b>WAV · MP3 · M4A · FLAC · OGG · OPUS · MP4 · MKV · MOV · WEBM</b></div>
   <div class="toggles">
     <label class="tgl"><input type="checkbox" id="vadFull"><span class="trk"></span><span><b>⚡ Skip silence</b><i>Also drops long gaps <u>inside</u> the recording — 2–3× faster; timeline, player and exports keep the original file &amp; timestamps</i></span></label>
@@ -329,6 +329,20 @@ $("audio").addEventListener("seeked", () => { follow = true; onTick(true); });
 function escapeHtml(x){ return x.replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function showStatus(msg, isErr){ const s=$("status"); s.classList.remove("hidden"); s.querySelector(".spin").style.display=isErr?"none":""; s.children[1].innerHTML=(isErr?'<span class="err">':'')+msg+(isErr?'</span>':''); }
 function hideStatus(){ $("status").classList.add("hidden"); }
+
+// Reflect the configured models rather than displaying the legacy live-engine names.
+(async function updateEngineSubtitle(){
+  const el = $("engineSubtitle");
+  try {
+    const r = await fetch("/api/health");
+    const h = await r.json(), a = h.asr || {};
+    const labels = {live:"Nemotron 3.5 ASR", fast:"Nemotron 3.5 ASR", balanced:"Parakeet TDT 0.6B v3", quality:"Canary 1B v2", german:"German FastConformer"};
+    const asr = a.label || labels[a.engine] || a.engine || "ASR";
+    const diar = (a.diarization || "speaker diarization").split("/").pop();
+    const lang = a.language_detection === "model" ? "automatic language detection" : `language: ${a.language || "auto"}`;
+    el.textContent = `${h.cuda ? "CUDA" : "CPU"} · ${diar} + ${asr} · ${lang}`;
+  } catch (_) { el.textContent = "Local speaker diarization + ASR"; }
+})();
 </script>
 </body>
 </html>
