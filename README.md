@@ -27,7 +27,11 @@ Two ways to get from audio to speaker-attributed text. Pick one globally with
 | `fast` | same weights, decoded offline | diarize first, ASR on the speaker cuts ([`segment_asr.py`](segment_asr.py)) | detected | 3.1 GB |
 | **`balanced`** *(default)* | Parakeet TDT 0.6B v3 (2.5 GB, 25 languages) | diarize first | detected by the model | 3.1 GB |
 | `quality` | Canary 1B v2 (6.4 GB) | diarize first | **must be given** (`--lang de`) | 5.5 GB |
-| `german` | stt_de_fastconformer_hybrid_large_pc (3.8 GB) | diarize first | German only | 3.2 GB |
+
+A fifth engine, `--asr german` (German-only FastConformer hybrid, 3.2 GB to be
+admitted), is implemented but deliberately left out of the comparison below: it is
+German-only, which `balanced` already covers, and its checkpoint is another 3.8 GB
+download.
 
 VRAM is what an engine asks the card for before it will load — bf16 weights, a
 CUDA context and the activations of a `batch_size=16` decode, measured from a real
@@ -394,6 +398,9 @@ evicted, or both:
   mid-decode on a 198 MiB activation tensor with 155 MiB left, because the neighbour's
   reservation *grew* after our check. Those rows completed on CPU at 164–317 s, i.e.
   they paid 40–110 s for the failed attempt.
+- Length is the risk factor: a 22-second clip on `balanced` loaded and finished on the
+  GPU at 4 GiB free without incident, while the 53-minute rows were evicted partway.
+  The longer the file, the likelier a neighbour is to grow into the gap.
 - The floor each engine needs is therefore weights + activations, not weights alone:
   3.1 GiB for `fast`/`balanced`, 3.2 for `german`, 5.5 for `quality`, and 2.5 measured
   for `live` — which is why `live` is the only engine that coexisted.
@@ -401,9 +408,6 @@ evicted, or both:
   the neighbour expanded into whatever was left.
 - `quality` (Canary, 4.4 GiB of bf16 weights) was never measurable on the GPU here, so
   its row is CPU-only and its GPU number is extrapolated, not verified.
-
-`german` is listed but not benchmarked: it is German-only, overlaps what `balanced`
-already does, and its 3.8 GB checkpoint would have to download first.
 
 Practical consequence: on a machine where a large model holds the card, run these
 engines on CPU (RTF 0.03–0.13) or run the transcript before starting that model. The

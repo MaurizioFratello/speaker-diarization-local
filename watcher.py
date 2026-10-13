@@ -672,10 +672,15 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
                     dur = max(w.getnframes() / w.getframerate(), 0.1)
                 if transcriber is None:
                     log("loading models…")
+                    # getattr rather than attribute access: an instance of this daemon
+                    # can be started from a unit file written before these options
+                    # existed, and a missing flag means "ask the environment".
                     transcriber = load_transcriber(
-                        args.asr, device=args.device, lang=args.lang,
-                        max_speakers=args.max_speakers, glossary=args.glossary,
-                        hotwords=args.hotwords,
+                        getattr(args, "asr", None), device=args.device,
+                        lang=getattr(args, "lang", None),
+                        max_speakers=args.max_speakers,
+                        glossary=getattr(args, "glossary", None),
+                        hotwords=getattr(args, "hotwords", None),
                     ).load()
                     log(f"models ready ({time.time() - t0:.0f}s): "
                         + ", ".join(f"{k}={v}" for k, v in transcriber.describe().items()
@@ -714,8 +719,14 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
                         raise EmptyResult(
                             f"no segments for {dur:.0f}s of non-silent audio")
                     raise NoSpeech("silent recording")
+                dsc = transcriber.describe()
                 write_transcript(src, digest, segs, entry, args,
-                                 extra_paths=job.get("copies"))
+                                 extra_paths=job.get("copies"),
+                                 engine={"label": dsc.get("label"),
+                                         "pipeline": dsc.get("pipeline"),
+                                         "device": str(transcriber.device),
+                                         "language": dsc.get("language"),
+                                         "repairs": len(fixes)})
                 entry.update(duration=round(dur, 1), elapsed=round(time.time() - t_work, 1))
                 done += 1
                 log(f"  ok: {len(segs)} segments, {len(entry['speakers'])} speakers, "
@@ -852,7 +863,8 @@ def _environmental(exc: BaseException) -> bool:
 
 
 def write_transcript(src: Path, digest: str, segs: list[dict], entry: dict, args,
-                     extra_paths: list[Path] | None = None) -> None:
+                     extra_paths: list[Path] | None = None,
+                     engine: dict | None = None) -> None:
     """Canonical JSON in data/results (plus local mirrors and sidecars by the audio).
 
     The canonical file is named with the first 12 hash digits and the web app's
@@ -865,11 +877,12 @@ def write_transcript(src: Path, digest: str, segs: list[dict], entry: dict, args
     """
     from exports import render_exports  # shared with the web app; stdlib-only on purpose
 
-    job = {"name": src.name, "segments": segs, "labels": {}}
+    job = {"name": src.name, "segments": segs, "labels": {}, "engine": engine}
     rendered = render_exports(job)
     canon = result_path(digest)
     _atomic_write(canon, json.dumps(
-        {"name": src.name, "segments": segs, "labels": {}}, ensure_ascii=False, indent=1))
+        {"name": src.name, "segments": segs, "labels": {}, "engine": engine},
+        ensure_ascii=False, indent=1))
     entry.update(result=str(canon), status="done", error=None, tries=0, env_strikes=0,
                  segments=len(segs), speakers=sorted({s["speaker"] for s in segs}),
                  ts=time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -944,10 +957,13 @@ def gpu_deferral_reason(args, *, include_util: bool = True) -> str | None:
         return ("nvidia-smi did not answer, so the state of the card is unknown "
                 "(driver busy, or the query timed out)")
     from engines import asr_mode, vram_floor_gib   # light: no torch, no NeMo
-    if asr_mode(args.asr) != "live":
-        # The 2 GiB floor was sized for `live`; the offline engines need more, and
-        # a courtesy guard that is too low just converts a wait into an OOM.
-        args.min_free_vram = max(args.min_free_vram, vram_floor_gib(args.asr))
+    # getattr: --asr is on this tool's parser, but gpu_deferral_reason is also called
+    # with older flag sets (tests, a unit file written before the option existed).
+    asr = getattr(args, "asr", None)
+    if asr_mode(asr) != "live":
+        # The 2.5 GiB floor was sized for `live`; the offline engines need more, and a
+        # courtesy guard that is too low just converts a wait into an OOM.
+        args.min_free_vram = max(args.min_free_vram, vram_floor_gib(asr))
     if free_gb < args.min_free_vram:
         return f"only {free_gb:.1f} GiB of VRAM free, {args.min_free_vram:.1f} GiB needed"
     if include_util and util is not None and util > args.max_other_util:

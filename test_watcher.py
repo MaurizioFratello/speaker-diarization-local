@@ -34,10 +34,26 @@ COUNT = {"init": 0, "release": 0}
 
 
 class Transcriber:
+    """Stand-in for either pipeline class: the watcher talks to them through
+    load_transcriber(), .load(), .transcribe(), .describe() and .last_corrections."""
+
+    device = "cpu"
+
     def __init__(self, **kw):
         COUNT["init"] += 1
+        self.last_corrections = [{"start": 0.5, "speaker": "speaker_0",
+                                  "from": "hallo", "to": "hello", "rule": "alias"}]
 
-    def transcribe(self, wav, publish=None):
+    def load(self):
+        return self
+
+    def describe(self):
+        return {"label": "fake engine", "pipeline": "test", "language": "auto"}
+
+    def unload(self):
+        pass
+
+    def transcribe(self, wav, publish=None, offset=0.0):
         for tag, err in FAULT.items():
             if tag in str(wav):
                 raise err
@@ -59,18 +75,27 @@ def prepare_audio(src, dst):
 
 
 SILENT = {"value": False}
+def load_transcriber(asr=None, **kw):
+    # late lookup on purpose: section 10 swaps pipeline.Transcriber for a slow engine
+    return getattr(sys.modules["pipeline"], "Transcriber")(**kw)
+
+
 mod = types.ModuleType("pipeline"); mod.Transcriber = Transcriber; mod.prepare_audio = prepare_audio
+mod.load_transcriber = load_transcriber
 mod._is_silent_wav = lambda wav, threshold=0.0: SILENT["value"]
 sys.modules["pipeline"] = mod
 # min_free_vram=0 / max_other_util=100 keep the GPU courtesy guard inert for the
 # queueing tests; sections 12-13 exercise that guard explicitly.
+# Mirrors watcher.py's own parser: transcribe_queue reads every one of these.
 args = argparse.Namespace(device="cuda", max_speakers=None, progress_every=0.0,
+                          asr=None, lang=None, glossary=None, hotwords=None,
                          no_sidecars=True, format_list=["md"], min_free_vram=0.0,
                          max_other_util=100, gpu_time_limit=0.0, mount_wait=25.0)
 
 
 def _gargs(**over):
     base = dict(device="cuda", max_speakers=None, progress_every=0.0, no_sidecars=True,
+                asr=None, lang=None, glossary=None, hotwords=None,
                 format_list=["md"], min_free_vram=0.0, max_other_util=100,
                 gpu_time_limit=0.0, mount_wait=25.0, min_age=0.0, only=None,
                 limit=0, force=False, dry_run=False, ignore_open=True)
@@ -311,7 +336,7 @@ def tq(**over):
 
 
 watcher.gpu_state = lambda: (3.0, 94)          # like sglang serving a request right now
-d, f, n = tq(min_free_vram=2.0, max_other_util=25)
+d, f, n = tq(min_free_vram=2.0, asr=None, lang=None, glossary=None, hotwords=None, max_other_util=25)
 check(d == 0 and f == 0 and n == 0,
       "deferred at 94% util with 3 GiB free, without loading a single model")
 
@@ -326,9 +351,18 @@ watcher.gpu_state = lambda: (None, None)       # nvidia-smi stops answering
 d, f, n = tq(min_free_vram=2.0, max_other_util=25)
 check(n == 0, "stands down instead of assuming an idle card it cannot see (fails closed)")
 
-watcher.gpu_state = lambda: (3.0, 94)           # the resident server is at full tilt
-d, f, n = tq(min_free_vram=2.0, max_other_util=100)
+watcher.gpu_state = lambda: (4.0, 94)           # room for the engine, but the resident
+d, f, n = tq(min_free_vram=2.0, max_other_util=100)   # server is at full tilt
 check(n == 1, "--max-other-util 100 disables the advisory utilisation guard")
+
+# 4.0 GiB is enough for the default engine's floor (balanced: 3.1); the utilisation
+# check above must not accidentally become a VRAM check.
+watcher.gpu_state = lambda: (4.0, 0)
+d, f, n = tq(min_free_vram=0.0, max_other_util=100, asr="quality")
+check(d == 0 and n == 0,
+      "the floor follows the engine: quality needs 5.5 GiB, so 4 GiB is not an invitation")
+d, f, n = tq(min_free_vram=0.0, max_other_util=100, asr="live")
+check(d == 1, "live is admitted at the same free memory")
 
 # A batch that opened the gate while the card was idle must run to the end of the
 # queue even if utilisation climbs: sglang idles at 0 % and sits at ~95 % while

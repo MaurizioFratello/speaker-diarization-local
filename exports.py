@@ -26,6 +26,24 @@ def spk_display(job: dict, speaker) -> str:
     return re.sub(r"^(?:speaker|spk)[_ ]", "Speaker ", str(speaker))
 
 
+def _provenance(engine) -> str | None:
+    """One italic line under the title, or nothing for a job that has no metadata."""
+    if not isinstance(engine, dict) or not engine.get("label"):
+        return None
+    bits = [str(engine["label"])]
+    if engine.get("pipeline"):
+        bits.append(str(engine["pipeline"]))
+    if engine.get("device"):
+        bits.append(f"on {engine['device']}")
+    n = engine.get("repairs")
+    if n:
+        bits.append(f"{n} vocabulary repair{'s' if n != 1 else ''}")
+    lang = engine.get("language")
+    if lang and lang != "auto":
+        bits.append(f"language {lang}")
+    return "*" + " · ".join(bits) + "*"
+
+
 def render_exports(job: dict) -> dict[str, str]:
     segs = job["segments"]
     name = job["name"]
@@ -36,6 +54,12 @@ def render_exports(job: dict) -> dict[str, str]:
         f"[{fmt_ts(s['start'], '.')} {spk_name(s['speaker'])}] {s['text']}" for s in segs
     )
     md = [f"# Transcript — {name}", ""]
+    prov = _provenance(job.get("engine"))
+    if prov:
+        # Provenance belongs in the artifact, not only in the log: a folder of
+        # transcripts transcribed over a year, by whichever engine was configured
+        # that week, is worth being able to audit without the ledger.
+        md += [prov, ""]
     for s in segs:
         md.append(f"**{spk_name(s['speaker'])}** `[{fmt_ts(s['start'], '.')}]`  \n{s['text']}\n")
     srt = []
