@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from pipeline import (
     Transcriber,
+    load_transcriber,
     map_spliced_time,
     prepare_audio,
     splice_speech_regions,
@@ -74,6 +75,12 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="Speaker Transcription", lifespan=_lifespan)
 
+# Global ASR choice (one setting, not per-upload): --asr / --lang / --glossary,
+# also readable from SPEAKER_ASR / SPEAKER_LANG / SPEAKER_GLOSSARY.
+ASR = {"mode": os.environ.get("SPEAKER_ASR", "balanced"),
+       "lang": os.environ.get("SPEAKER_LANG", "auto"),
+       "glossary": os.environ.get("SPEAKER_GLOSSARY", "")}
+
 transcriber: Transcriber | None = None
 transcriber_error: str | None = None
 transcriber_lock = threading.Lock()
@@ -107,7 +114,10 @@ def get_transcriber(device: str | None) -> Transcriber:
         if transcriber is None:
             _model_load_active.set()
             try:
-                transcriber = Transcriber(device=device)
+                transcriber = load_transcriber(
+                    ASR["mode"], device=device, lang=ASR["lang"],
+                    glossary=ASR["glossary"] or None,
+                ).load()
             except Exception as exc:  # surface load failure to clients
                 transcriber_error = f"{type(exc).__name__}: {exc}"
                 raise
@@ -132,7 +142,8 @@ def _result_path(job_id: str) -> Path:
 def _save_result(job: dict) -> None:
     _result_path(job["id"]).write_text(
         json.dumps({"name": job.get("name"), "segments": job["segments"], "labels": job.get("labels") or {},
-                    "vad_full": bool(job.get("vad_full"))}, ensure_ascii=False, indent=1),
+                    "vad_full": bool(job.get("vad_full")), "engine": job.get("engine"),
+                    "corrections": job.get("corrections") or []}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
     # Human-readable markdown copy saved alongside the machine-readable result;
@@ -230,6 +241,7 @@ def run_job(job_id: str, src_path: Path, device: str | None, vad_full: bool = Fa
         if _model_load_active.is_set() and not model_ready_event.is_set():
             model_ready_event.wait(timeout=600)
         tr = get_transcriber(device)
+        job["engine"] = tr.describe()
         _check_shutdown()
         with _gpu_lock:
             job["stage"] = "transcribing"
@@ -277,6 +289,7 @@ def run_job(job_id: str, src_path: Path, device: str | None, vad_full: bool = Fa
             stage=None,
             partial=None, partial_speakers=None, progress=None, step=None,
         )
+        job["corrections"] = list(getattr(tr, "last_corrections", []))
         _save_result(job)
         _sweep_uploads(wav)
         (QUEUE_DIR / f"{job_id}.json").unlink(missing_ok=True)
@@ -386,6 +399,8 @@ async def api_job(job_id: str):
         UPLOAD_DIR.glob(f"{job_id}.*")
     )
     keep["progress"] = job.get("progress")
+    keep["engine"] = job.get("engine")
+    keep["glossary_fixes"] = len(job.get("corrections") or [])
     if job["status"] == "done":
         keep["segments"] = job["segments"]
     elif job.get("partial") is not None:
@@ -460,6 +475,8 @@ async def api_health():
         "model_error": transcriber_error,
         "cuda": torch.cuda.is_available(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "asr": (transcriber.describe() if transcriber is not None
+                else {"engine": ASR["mode"], "language": ASR["lang"], "loaded": False}),
     }
 
 
@@ -503,6 +520,12 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--device", default=None, help="cuda (default) or cpu")
+    ap.add_argument("--asr", default=ASR["mode"],
+                    help="transcription engine: live | fast | balanced | quality | german")
+    ap.add_argument("--lang", default=ASR["lang"],
+                    help="language for engines that require one (e.g. de); auto elsewhere")
+    ap.add_argument("--glossary", default=ASR["glossary"],
+                    help="file of canonical spellings to repair in the output")
     ap.add_argument("--preload", action="store_true", help="load models at startup")
     ap.add_argument("--open-browser", action="store_true",
                     help="open the UI in the default browser once startup (and --preload "
@@ -514,6 +537,7 @@ def main() -> None:
     global VAD_TRIM
     if args.no_vad_trim:
         VAD_TRIM = False
+    ASR.update(mode=args.asr, lang=args.lang, glossary=args.glossary)
 
     _requeue_pending()
 

@@ -20,6 +20,7 @@ MIN_AGE="180"                               # seconds a file must be unchanged
 APP_PORT="8765"                             # your web app's port; while it serves, the watcher waits
 MOUNT_WAIT="25"                             # seconds to wait for the share at boot before standing down
 MIN_FREE_VRAM="2.0"                         # GiB that must be free before models load
+                                           # (raised automatically for the bigger --asr engines)
 # Utilisation is deliberately NOT a gate by default (100 = ignore it). On a box with a
 # resident inference server it is meaningless: nvidia-smi reads 0 % between requests and
 # ~95 % while one is in flight, so gating on it starves the queue for hours without ever
@@ -28,8 +29,22 @@ MIN_FREE_VRAM="2.0"                         # GiB that must be free before model
 # of backlog got transcribed alongside it. Set e.g. 60 to also stand down during heavy use.
 MAX_OTHER_UTIL="100"
 GPU_TIME_LIMIT="480"                        # minutes of GPU work per run, then give the card back
-EXTRA_ARGS=""                               # e.g. "--no-sidecars" or "--max-speakers 4"
+# --- transcription engine ----------------------------------------------------
+# One global choice, not per file. live = the streaming path (partial text while
+# it runs, handles overlapping speakers, Nemotron 3.5 ASR 0.6B). The others run
+# diarization first and then an offline ASR engine over the speaker cuts: better
+# sentences and better German, progress arrives per speaker turn instead of per
+# second.   live | fast | balanced | quality | german
+ASR="balanced"
+# Language for the engines that have no built-in detection (quality/german).
+# "auto" keeps the ones that do detect it (live/fast/balanced) and makes
+# `quality` refuse to start rather than guess.
+ASR_LANG="auto"
+# Optional file of canonical spellings (names, product words) to repair in the
+# output; every rewrite is logged. See glossary.example.txt.
+ASR_GLOSSARY=""
 # ----------------------------------------------------------------------------
+EXTRA_ARGS=""                               # e.g. "--no-sidecars" or "--max-speakers 4"
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
 PY="$PROJ/.venv/bin/python"
@@ -43,6 +58,8 @@ write_units() {
   [ -x "$PY" ] || die "$PY not found — run ./setup.sh first"
   case "$PROJ$WATCH_DIR" in *'"'*) die 'paths may not contain a double quote (breaks systemd unit quoting)' ;; esac
   [ -f "$PROJ/watcher.py" ] || die "watcher.py missing next to this script"
+  case " ${ASR} " in " live "|" fast "|" balanced "|" quality "|" german ") ;; \
+    *) die "ASR must be one of: live fast balanced quality german (got '${ASR}')" ;; esac
   mkdir -p "$UNITS"
   # systemd reads '%' in a unit file as a unit specifier, so a percent-encoded
   # URL needs each '%' doubled to survive into the value.
@@ -69,6 +86,9 @@ Environment=SPEAKER_MOUNT_WAIT=${MOUNT_WAIT}
 Environment=SPEAKER_MIN_FREE_VRAM=${MIN_FREE_VRAM}
 Environment=SPEAKER_MAX_OTHER_UTIL=${MAX_OTHER_UTIL}
 Environment=SPEAKER_GPU_TIME_LIMIT=${GPU_TIME_LIMIT}
+Environment=SPEAKER_ASR=${ASR}
+Environment=SPEAKER_LANG=${ASR_LANG}
+Environment=SPEAKER_GLOSSARY=${ASR_GLOSSARY}
 # Be gentle: this should not compete with an interactive session or the NAS.
 Nice=10
 IOSchedulingClass=best-effort

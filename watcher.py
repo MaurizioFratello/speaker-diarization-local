@@ -627,7 +627,7 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
             "the next tick will try again")
         return 0, 0
 
-    from pipeline import Transcriber, prepare_audio  # heavy: pulls in the GPU stack
+    from pipeline import load_transcriber, prepare_audio  # heavy: pulls in the GPU stack
     try:
         from pipeline import _is_silent_wav as is_silent
     except ImportError:  # older vendored copy: assume non-silent, so empties are retried
@@ -672,8 +672,13 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
                     dur = max(w.getnframes() / w.getframerate(), 0.1)
                 if transcriber is None:
                     log("loading models…")
-                    transcriber = Transcriber(device=args.device, max_speakers=args.max_speakers)
-                    log(f"models ready ({time.time() - t0:.0f}s)")
+                    transcriber = load_transcriber(
+                        args.asr, device=args.device, lang=args.lang,
+                        max_speakers=args.max_speakers, glossary=args.glossary or None,
+                    ).load()
+                    log(f"models ready ({time.time() - t0:.0f}s): "
+                        + ", ".join(f"{k}={v}" for k, v in transcriber.describe().items()
+                                    if k in ("label", "language", "pipeline")))
                 t_work = time.time()  # per-file throughput excludes the one-off model load
 
                 beat = [0.0]
@@ -931,6 +936,10 @@ def gpu_deferral_reason(args, *, include_util: bool = True) -> str | None:
         # see the card has the priority exactly backwards for this watcher.
         return ("nvidia-smi did not answer, so the state of the card is unknown "
                 "(driver busy, or the query timed out)")
+    if getattr(args, "asr", "balanced") != "live":
+        # `live` was sized for 2 GiB; the offline engines are bigger.
+        from engines import vram_floor_gib
+        args.min_free_vram = max(args.min_free_vram, vram_floor_gib(args.asr))
     if free_gb < args.min_free_vram:
         return f"only {free_gb:.1f} GiB of VRAM free, {args.min_free_vram:.1f} GiB needed"
     if include_util and util is not None and util > args.max_other_util:
@@ -1014,6 +1023,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", default=None,
                     help="only consider files whose path matches this regex (e.g. 'recording0011')")
     ap.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
+    ap.add_argument("--asr", default=os.environ.get("SPEAKER_ASR", "balanced"),
+                    help="transcription engine: live | fast | balanced | quality | german "
+                         "(env SPEAKER_ASR)")
+    ap.add_argument("--lang", default=os.environ.get("SPEAKER_LANG", "auto"),
+                    help="language code for engines that require one, e.g. de (env SPEAKER_LANG)")
+    ap.add_argument("--glossary", default=os.environ.get("SPEAKER_GLOSSARY", ""),
+                    help="file of canonical spellings to repair (env SPEAKER_GLOSSARY)")
+    ap.add_argument("--hotwords", default=os.environ.get("SPEAKER_HOTWORDS", ""),
+                    help="context biasing hint for engines that support it (env SPEAKER_HOTWORDS)")
     ap.add_argument("--max-speakers", type=int, default=None, help="cap speaker streams (1-8)")
     ap.add_argument("--formats", default="md", help=f"comma list from {'|'.join(FORMATS)}")
     ap.add_argument("--min-age", type=float, default=180.0,

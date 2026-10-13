@@ -78,6 +78,7 @@
       <span class="badge" id="rDur"></span>
       <span class="badge" id="rSpk"></span>
       <span class="badge" id="rTime"></span>
+      <span class="badge" id="rEngine" title="ASR engine that produced this transcript"></span>
     </div>
     <div class="legend" id="legend"></div>
     <div class="tlwrap"><canvas id="timeline" width="940" height="110"></canvas><div id="ph" class="ph hidden"></div></div>
@@ -205,6 +206,11 @@ function render(id, job){
   $("rDur").textContent = `⏱ ${fmtTime(job.duration || 0)} audio`;
   $("rSpk").textContent = `👤 ${job.speakers.length} speaker${job.speakers.length===1?"":"s"}`;
   $("rTime").textContent = isPartial ? `⚙ transcribing… ${Math.round((job.progress||0)*100)}%` : `⚙ ${job.elapsed ?? "?"}s processing`;
+  const eng = job.engine || {};
+  $("rEngine").textContent = eng.label
+    ? `🎙 ${eng.label}${eng.language && eng.language !== "auto" ? ` · ${eng.language}` : ""}`
+      + (job.glossary_fixes ? ` · ${job.glossary_fixes} glossary fix${job.glossary_fixes === 1 ? "" : "es"}` : "")
+    : "";
   const pb = $("pbar");
   if (isPartial) { pb.classList.remove("hidden"); pb.style.width = Math.round((job.progress||0)*100) + "%"; }
   else pb.classList.add("hidden");
