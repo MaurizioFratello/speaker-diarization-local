@@ -9,6 +9,7 @@ Diarization and ASR run locally via NeMo; model choice is configurable with
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -125,9 +126,32 @@ app = FastAPI(title="Speaker Transcription", lifespan=_lifespan)
 ASR = {"mode": os.environ.get("SPEAKER_ASR", "balanced"),
        "lang": os.environ.get("SPEAKER_LANG", "auto"),
        "glossary": os.environ.get("SPEAKER_GLOSSARY", "")}
+DEVICE_SETTINGS_FILE = DATA_DIR / "app-settings.json"
 
+
+def _read_device_preference() -> str:
+    env_device = os.environ.get("SPEAKER_DEVICE", "").lower()
+    if env_device in {"cuda", "cpu"}:
+        return env_device
+    try:
+        saved = json.loads(DEVICE_SETTINGS_FILE.read_text(encoding="utf-8")).get("device")
+        if saved in {"cuda", "cpu"}:
+            return saved
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return "cuda"  # pipeline safely falls back to CPU if CUDA is unavailable/full
+
+
+def _save_device_preference(device: str) -> None:
+    tmp = DEVICE_SETTINGS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"device": device}, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, DEVICE_SETTINGS_FILE)
+
+
+DEVICE_PREFERENCE = _read_device_preference()
 transcriber: Transcriber | None = None
 transcriber_error: str | None = None
+transcriber_device_preference: str | None = None
 transcriber_lock = threading.Lock()
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
@@ -151,30 +175,48 @@ _model_load_active = threading.Event()
 
 # --------------------------------------------------------------------------- models
 
-def get_transcriber(device: str | None) -> Transcriber:
-    global transcriber, transcriber_error
+def _release_loaded_transcriber() -> None:
+    global transcriber, transcriber_device_preference
+    import torch
+    old = transcriber
+    transcriber = None
+    transcriber_device_preference = None
+    if old is not None:
+        try:
+            old.unload()
+        finally:
+            del old
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
+def get_transcriber(device: str | None = None) -> Transcriber:
+    global transcriber, transcriber_error, transcriber_device_preference
+    device = device or DEVICE_PREFERENCE
     with transcriber_lock:
-        if transcriber_error:
-            raise RuntimeError(transcriber_error)
-        if transcriber is None:
-            _model_load_active.set()
-            try:
-                transcriber = load_transcriber(
-                    ASR["mode"], device=device, lang=ASR["lang"],
-                    glossary=ASR["glossary"] or None,
-                ).load()
-            except Exception as exc:  # surface load failure to clients
-                transcriber_error = f"{type(exc).__name__}: {exc}"
-                raise
-            finally:
-                model_ready_event.set()
-        elif device is not None and transcriber.device.type != device:
-            raise HTTPException(
-                409,
-                f"Models are already loaded on '{transcriber.device.type}'; "
-                f"restart the server to switch to '{device}'.",
-            )
-        return transcriber
+        if transcriber is not None and transcriber_device_preference == device:
+            return transcriber
+        _model_load_active.set()
+        model_ready_event.clear()
+        try:
+            if transcriber is not None:
+                _release_loaded_transcriber()
+            # A failed load is retryable, e.g. after the user changes the device.
+            transcriber_error = None
+            transcriber = load_transcriber(
+                ASR["mode"], device=device, lang=ASR["lang"],
+                glossary=ASR["glossary"] or None,
+            ).load()
+            transcriber_device_preference = device
+            return transcriber
+        except Exception as exc:  # surface load failure to clients
+            transcriber_error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            _model_load_active.clear()
+            model_ready_event.set()
 
 
 # --------------------------------------------------------------------------- jobs
@@ -416,13 +458,11 @@ async def api_transcribe(request: Request):
         src.unlink(missing_ok=True)
         raise HTTPException(400, "Empty file.")
 
-    device = None
-    if "cpu" in form:
-        device = "cpu"
     vad_full = "vad_full" in form
     job = {"id": job_id, "name": name, "status": "queued", "stage": None,
            "segments": None, "vad_full": vad_full}
     with jobs_lock:
+        device = DEVICE_PREFERENCE
         if len(_queue) >= MAX_QUEUED:
             src.unlink(missing_ok=True)
             raise HTTPException(429, f"Queue full ({MAX_QUEUED} jobs) — try again later.")
@@ -523,6 +563,41 @@ async def api_session_heartbeat():
     return {"ok": True}
 
 
+@app.get("/api/settings")
+async def api_settings():
+    return {
+        "device_preference": DEVICE_PREFERENCE,
+        "actual_device": transcriber.device.type if transcriber is not None else None,
+        "model_loaded": transcriber is not None,
+    }
+
+
+@app.post("/api/settings/device")
+async def api_set_device(request: Request):
+    global DEVICE_PREFERENCE
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body.")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON body must be an object.")
+    device = str(body.get("device", "")).lower()
+    if device not in {"cuda", "cpu"}:
+        raise HTTPException(400, "device must be 'cuda' or 'cpu'.")
+    if _model_load_active.is_set():
+        raise HTTPException(409, "Models are currently loading; try again shortly.")
+    with jobs_lock:
+        if any(j.get("status") in ("queued", "running") for j in jobs.values()):
+            raise HTTPException(409, "Wait for queued/running transcriptions before switching devices.")
+        DEVICE_PREFERENCE = device
+        _save_device_preference(device)
+    try:
+        tr = await asyncio.to_thread(get_transcriber, device)
+    except Exception as exc:
+        raise HTTPException(500, f"Could not load models on {device}: {exc}")
+    return {"device_preference": device, "actual_device": tr.device.type, "model_loaded": True}
+
+
 @app.get("/api/health")
 async def api_health():
     import torch
@@ -531,6 +606,8 @@ async def api_health():
         "model_loaded": transcriber is not None,
         "model_error": transcriber_error,
         "cuda": torch.cuda.is_available(),
+        "device": transcriber.device.type if transcriber is not None else None,
+        "device_preference": DEVICE_PREFERENCE,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "asr": (transcriber.describe() if transcriber is not None
                 else {"engine": ASR["mode"], "language": ASR["lang"], "loaded": False}),
@@ -594,15 +671,17 @@ def main() -> None:
                     help="disable Silero VAD trimming of leading/trailing silence")
     args = ap.parse_args()
 
-    global VAD_TRIM
+    global VAD_TRIM, DEVICE_PREFERENCE
     if args.no_vad_trim:
         VAD_TRIM = False
+    if args.device:
+        DEVICE_PREFERENCE = args.device
     ASR.update(mode=args.asr, lang=args.lang, glossary=args.glossary)
 
     _requeue_pending()
 
     if args.preload:
-        threading.Thread(target=lambda: get_transcriber(args.device), daemon=True).start()
+        threading.Thread(target=lambda: get_transcriber(DEVICE_PREFERENCE), daemon=True).start()
 
     config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
     server = uvicorn.Server(config)

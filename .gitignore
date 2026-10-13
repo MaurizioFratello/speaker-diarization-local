@@ -15,8 +15,10 @@ __pycache__/
 bench/
 *.bench.log
 
-# local app/batch data (contains generated job IDs and transcripts)
+# local app/batch data (contains generated job IDs, transcripts and preferences)
 data/batches/
+data/app-settings.json
+data/app-settings.tmp
 
 # watcher.py bookkeeping (regenerated automatically)
 data/transcripts/

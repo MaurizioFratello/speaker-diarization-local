@@ -162,6 +162,8 @@ Deployment settings are environment variables, read in this order: CLI flag →
 the systemd unit, so there is one place to change the engine on a server.
 
 - `SPEAKER_ASR=live|fast|balanced|quality|german` — the global engine choice.
+- `SPEAKER_DEVICE=cuda|cpu` selects the startup device. The browser's **Use CPU** switch
+  changes it immediately, unloads/reloads the models, and saves the preference for next launch.
 - `SPEAKER_LANG=de` — required by `quality`, optional for the others. On `live` it
   conditions the model's prompt, and a language the audio does not speak can make
   the output collapse to nothing there, so leave it at `auto` for mixed meetings.
