@@ -51,7 +51,7 @@ from nemo.utils import logging as nemo_logging
 
 from dataclasses import replace
 
-from engines import EngineSpec, NemoOfflineEngine, asr_mode, env, resolve_spec
+from engines import EngineSpec, NemoOfflineEngine, asr_mode, env, locale_tag, resolve_spec
 from glossary import correct_segments, load_glossary_if_exists
 from model_store import MODELS_DIR, mirror_path  # re-exported: callers import these from here
 from model_store import load_nemo_model as _load_model
@@ -346,8 +346,12 @@ class Transcriber(GlossaryFix):
         max_speakers: int | None = None,
         asr_bf16: bool | None = None,
         glossary: str | os.PathLike | None = None,
+        lang: str | None = None,
     ) -> None:
         torch.set_float32_matmul_precision("high")
+        # Resolved once here: the prompt is set later in this method, and describe()
+        # has to answer "which language did we condition on?" without loading again.
+        self.lang = (lang or env("LANG", "auto") or "auto").strip().lower()
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -410,7 +414,11 @@ class Transcriber(GlossaryFix):
             raise ValueError("ASR model does not support multiple lookaheads.")
 
         if hasattr(self.asr_model, "set_inference_prompt"):
-            self.asr_model.set_inference_prompt(PIPELINE_CFG["target_lang"] or "auto")
+            # ``--lang de`` conditions the prompt instead of letting the model decide;
+            # auto (the default) is what a mixed-language meeting wants.
+            prompt = (PIPELINE_CFG["target_lang"] if self.lang == "auto"
+                      else locale_tag(self.lang))
+            self.asr_model.set_inference_prompt(prompt or "auto")
             self.asr_model.decoding.set_strip_lang_tags(
                 PIPELINE_CFG["strip_lang_tags"],
                 lang_tag_pattern=PIPELINE_CFG["lang_tag_pattern"],
@@ -464,8 +472,8 @@ class Transcriber(GlossaryFix):
             "engine": "live",
             "label": "Nemotron 3.5 ASR Streaming 0.6B",
             "model": self._asr_id,
-            "language": "auto",
-            "language_detection": "model",
+            "language": getattr(self, "lang", "auto"),
+            "language_detection": "model" if getattr(self, "lang", "auto") == "auto" else "prompt",
             "timestamps": True,
             "pipeline": "coupled streaming (multitalker)",
             "diarization": DIAR_MODEL_ID,
@@ -680,7 +688,8 @@ def load_transcriber(
     """Build the transcriber for an ``--asr`` value (``live`` keeps the streaming path)."""
     mode = asr_mode(asr)
     if mode in ("live", "streaming", "coupled"):
-        return Transcriber(device=device, max_speakers=max_speakers, glossary=glossary)
+        return Transcriber(device=device, max_speakers=max_speakers, glossary=glossary,
+                           lang=lang)
     return OfflineTranscriber(
         mode,
         device=device,
