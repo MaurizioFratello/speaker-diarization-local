@@ -13,6 +13,7 @@ Name=Speaker Diarization
 Comment=Open the local speaker transcription app
 Exec="$ROOT/start-app.sh"
 Path=$ROOT
+Icon=$ROOT/static/speaker-diarization.svg
 Terminal=false
 Categories=AudioVideo;Audio;
 EOF
