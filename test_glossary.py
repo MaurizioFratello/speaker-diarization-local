@@ -122,6 +122,19 @@ check(fix("Herr Muller", min_len=8) == "Herr Muller", "min_len=8 blocks the 6-le
 check(fix("Herr Muller", min_ratio=0.99) == "Herr Muller", "min_ratio=0.99 blocks ratio 0.923")
 check(fix("Das memz", min_ratio=0.5) == "Das MEMS", "aliases never depend on min_ratio")
 
+print("6b) fuzzy has to be near-exact for short words")
+g6 = glossary.parse_glossary("Müller\tMuller\nDehnungsmessstreifen\tDänemessstreifen\n", )
+out, ch = glossary.correct_text("die manuelle Kalibrierung und ein Modeller Bericht", g6)
+check(out == "die manuelle Kalibrierung und ein Modeller Bericht",
+      f"real words are not renamed by near-miss matching: {out!r}")
+out, ch = glossary.correct_text("der Muller und Dehnungsmessstreiffen", g6)
+check(out == "der Müller und Dehnungsmessstreifen", f"repairs still fire: {out!r}")
+out, _ = glossary.correct_text("der Dehnungmessstreifen", g6)
+check(out == "der Dehnungmessstreifen",
+      "a fix that would lengthen the word needs an explicit alias, not a near miss")
+out, _ = glossary.correct_text("das Modul und die Module", g6)
+check(out == "das Modul und die Module", "unrelated short words untouched")
+
 print("7) parser")
 P = glossary.parse_glossary(
     "# comment\n"

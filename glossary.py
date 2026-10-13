@@ -35,7 +35,11 @@ File format (`--glossary FILE`, UTF-8 with or without BOM)::
   a suffix (`Kraftsensori` → `Kraftsensor`) is far more often right than inventing
   one, and every measured false positive in this repo's transcripts was a
   lengthening — `Modul`, `Module`, `model` → `E-Modul` at 0.83-0.91. Write such a
-  term as an explicit alias instead (`E-Modul\tE Modul;E-Moduls`). Listing a
+  term as an explicit alias instead (`E-Modul\tE Modul;E-Moduls`). Short
+  candidates are additionally capped to a few edit operations (`max(1, 25 % of the
+  canonical length)`), because a ratio alone calls `manuelle` close enough to
+  `Müller`; measured in this corpus, that is a German word replaced by a surname.
+  Listing a
   plain word as its own canonical is the other shield: an exact canonical match is
   never rewritten.
 * A line starting with `!` protects words rather than introducing one — e.g.
@@ -241,6 +245,35 @@ def _match_alias(g: Glossary, norms: list[str], i: int) -> "tuple[int, str] | No
     return None
 
 
+def _edit_distance(a: str, b: str, budget: int) -> int:
+    """Levenshtein distance, or ``budget + 1`` as soon as it is known to exceed it.
+
+    Bounded because this runs per token over whole transcripts: the row is only ever
+    needed at width ``budget``, and a word that is already too different does not
+    deserve exact arithmetic.
+    """
+    if abs(len(a) - len(b)) > budget:
+        return budget + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        lo = max(1, i - budget)
+        hi = min(len(b), i + budget)
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            if j < lo or j > hi:
+                cur.append(budget + 1)
+                continue
+            cost = 0 if ca == cb else 1
+            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            cur.append(v)
+            row_min = min(row_min, v)
+        if row_min > budget:
+            return budget + 1
+        prev = cur
+    return prev[-1]
+
+
 def _best_fuzzy(
     sm: difflib.SequenceMatcher, g: Glossary, tn: str, min_ratio: float, tlen: int
 ) -> str | None:
@@ -254,6 +287,15 @@ def _best_fuzzy(
         if sm.real_quick_ratio() < bar or sm.quick_ratio() < bar:
             continue
         ratio = sm.ratio()
+        # A similarity ratio alone is too generous for short words: it takes only a
+        # couple of edits to look 80 % alike, and "manuelle" -> "Müller" (measured, in
+        # this corpus) is a real German word replaced by a surname. Short candidates
+        # therefore also have to be within a few characters of the canonical spelling;
+        # long domain terms are allowed to be further off, and the risky cases are
+        # listed as explicit aliases anyway.
+        allowed = max(1, int(clen * 0.25))
+        if _edit_distance(tn, cn, allowed) > allowed:
+            continue
         if ratio >= bar and (best is None or ratio > best_ratio):
             best, best_ratio = canon, ratio
     return best

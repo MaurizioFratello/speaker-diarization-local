@@ -32,7 +32,9 @@ MEMS	memz;meens;MEMSe
 E-Modul	Ebenmoduli;E Modul;E-Moduls
 !Modul;Module;Model
 Kraftsensor	Kraftsensori;Kraftssensor
-Dehnungsmessstreifen	Dänemessstreifen;Demessreifen;Denmehrstreifen;demerst Streifen;Dehnungs messstreifen
+Dehnungsmessstreifen	Dänemessstreifen;Demessreifen;Denmehrstreifen;demerst Streifen;Dehnungs messstreifen;Dmessstreifen;Demessstreifen;Dehnmisstreifen;Investstreifen
+Dehnungsmessstreifenmarkt	Demessstreifenmarkt
+Positionssensorik	Positionsensorik
 stresskompensiert	Stress kompensieren;Stress-kompensiert
 Stresssensoren	Stress sensoren;Stresssensorien
 Motorrad	Motorrade
