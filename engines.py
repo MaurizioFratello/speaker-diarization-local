@@ -410,7 +410,7 @@ def vram_floor_gib(asr: str | None) -> float:
     checkpoint onto a card with 2 GiB free and OOM on the way in.
     """
     try:
-        spec = resolve_spec(asr or "balanced")
+        spec = resolve_spec(asr_mode(asr))   # None/'' -> SPEAKER_ASR -> default
     except EngineError:
         return 2.0
     return round(spec.weights_gib / 2 + 0.9, 1)

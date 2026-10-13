@@ -696,6 +696,12 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
 
                 segs = [s for s in transcriber.transcribe(wav, publish=publish)
                         if (s.get("text") or "").strip()]
+                fixes = getattr(transcriber, "last_corrections", []) or []
+                if fixes:
+                    # The audit trail is the point of text-side correction: say what
+                    # was rewritten instead of quietly "improving" the transcript.
+                    log(f"    glossary: {len(fixes)} repair(s), first: "
+                        f"{fixes[0]['from']!r} -> {fixes[0]['to']!r} ({fixes[0]['rule']})")
                 if not segs:
                     # Empty output means silence only if the audio actually *is*
                     # silent: otherwise a file the models could not read would be
@@ -937,11 +943,11 @@ def gpu_deferral_reason(args, *, include_util: bool = True) -> str | None:
         # see the card has the priority exactly backwards for this watcher.
         return ("nvidia-smi did not answer, so the state of the card is unknown "
                 "(driver busy, or the query timed out)")
-    from engines import asr_mode           # light import: no torch, no NeMo
-    if asr_mode(args) != "live":
-        # `live` was sized for 2 GiB; the offline engines are bigger.
-        from engines import vram_floor_gib
-        args.min_free_vram = max(args.min_free_vram, vram_floor_gib(asr_mode(args)))
+    from engines import asr_mode, vram_floor_gib   # light: no torch, no NeMo
+    if asr_mode(args.asr) != "live":
+        # The 2 GiB floor was sized for `live`; the offline engines need more, and
+        # a courtesy guard that is too low just converts a wait into an OOM.
+        args.min_free_vram = max(args.min_free_vram, vram_floor_gib(args.asr))
     if free_gb < args.min_free_vram:
         return f"only {free_gb:.1f} GiB of VRAM free, {args.min_free_vram:.1f} GiB needed"
     if include_util and util is not None and util > args.max_other_util:
