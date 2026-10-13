@@ -110,14 +110,14 @@ json.dump({"segments": segs, "load_s": load, "wall_s": wall, "peak_gib": peak,
     if proc.returncode != 0 or not row_file.is_file():
         tail = [l for l in (proc.stderr or "").splitlines() if l.strip()][-6:]
         return {"config": cfg, "device": device, "device_used": "-",
-                "error": " | ".join(tail)[-600:], "note": NOTE.get(cfg, ""),
+                "error": " | ".join(tail)[-600:], "note": NOTE.get((cfg, device), ""),
                 "wall_s": time.time() - t0}
     row = json.loads(row_file.read_text())
     row.update(config=cfg, device=device, total_s=time.time() - t0)
     return row
 
 
-NOTE = {c: n for c, _, n in SWEEP}
+NOTE = {(c, d): n for c, d, n in SWEEP}   # keyed by the pair: the notes are device-specific
 
 
 def _stats(row: dict) -> dict:
@@ -136,7 +136,7 @@ def _stats(row: dict) -> dict:
         "words_per_seg": round(statistics.mean(words), 1) if words else 0,
         "pct_short": round(100 * sum(1 for w in words if w <= 2) / len(words)) if words else 0,
         "speakers": len({s["speaker"] for s in segs}),
-        "note": NOTE.get(row["config"], ""),
+        "note": NOTE.get((row["config"], row["device"]), ""),
     }
 
 
@@ -193,6 +193,14 @@ def main() -> int:
 
     rows = []
     for cfg, device in pairs:
+        # Hand the language only to engines that require one: live/fast/balanced
+        # detect per utterance, and forcing German on them would lose mixed English
+        # terms and measure a configuration nobody would deploy.
+        try:
+            from engines import resolve_spec
+            row_lang = args.lang if not resolve_spec(cfg).native_auto else "auto"
+        except Exception:
+            row_lang = args.lang
         d = out / f"{cfg}_{device}"
         if args.existing and not (d / "row.json").is_file():
             continue
@@ -201,7 +209,7 @@ def main() -> int:
             print(f"    card: {time.strftime('%H:%M:%S')}", flush=True)
             _wait_for_gpu(cfg, args.wait_gpu)
         row = (json.loads((d / "row.json").read_text()) if (d / "row.json").is_file()
-               else _child(cfg, device, args.media, args.lang, d,
+               else _child(cfg, device, args.media, row_lang, d,
                            str(ROOT / args.glossary) if args.glossary else ""))
         (d / "row.json").write_text(json.dumps(row))
         segs = row.get("segments") or []
