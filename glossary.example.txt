@@ -29,7 +29,7 @@
 
 Müller	Muller;Mueller
 MEMS	memz;meens;MEMSe
-E-Modul	Ebenmoduli;E Modul;E-Moduls
+E-Modul	Ebenmoduli;Eben Moduli;E Modul;E-Moduls
 !Modul;Module;Model
 Kraftsensor	Kraftsensori;Kraftssensor
 Dehnungsmessstreifen	Dänemessstreifen;Demessreifen;Denmehrstreifen;demerst Streifen;Dehnungs messstreifen;Dmessstreifen;Demessstreifen;Dehnmisstreifen;Investstreifen
