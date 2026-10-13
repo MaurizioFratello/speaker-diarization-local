@@ -626,6 +626,8 @@ class OfflineTranscriber(GlossaryFix):
             max_speakers = int(env("MAX_SPKS"))
 
         device, dtype = _pick_device(spec, device)
+        if os.environ.get("SPEAKER_CUDA_ONLY") == "1" and device != "cuda":
+            raise RuntimeError(f"CUDA-only run refused: selected {device}, not cuda")
         # "ran on cpu" is ambiguous without this: it happens both when the gate
         # refuses up front and when a co-resident process evicts us mid-file, and the
         # two call for different answers (a smaller batch vs. a smaller job).
@@ -658,7 +660,7 @@ class OfflineTranscriber(GlossaryFix):
         try:
             self._impl.load()
         except Exception as exc:
-            if "out of memory" not in str(exc).lower():
+            if "out of memory" not in str(exc).lower() or os.environ.get("SPEAKER_CUDA_ONLY") == "1":
                 raise
             self.cuda_note = ("refused at load: " + " ".join(str(exc).split())[:160])
             nemo_logging.warning(
@@ -695,7 +697,8 @@ class OfflineTranscriber(GlossaryFix):
             # fallback alone would leave an unattended watcher failing the same file
             # on every tick, so the run itself degrades: drop the card, redo it on
             # CPU, and tell the caller which device answered.
-            if self.device.type != "cuda" or "out of memory" not in str(exc).lower():
+            if (self.device.type != "cuda" or "out of memory" not in str(exc).lower()
+                    or os.environ.get("SPEAKER_CUDA_ONLY") == "1"):
                 raise
             self.cuda_note = ("evicted mid-decode: " + " ".join(str(exc).split())[:160])
             nemo_logging.warning(
