@@ -347,10 +347,22 @@ Shipped, in this order (each a separate commit, so any step can be reverted):
 | commit | content |
 |---|---|
 | `1db071a` | `model_store.py` — local `models/*.nemo` first, Hub as fallback |
-| `491c8c8` | `glossary.py` + 81-check suite — text-side vocabulary repair with an audit trail |
+| `491c8c8` | `glossary.py` + test suite — text-side vocabulary repair with an audit trail |
 | `bcf53e9` | `engines.py`, `segment_asr.py`, `pipeline.py` — the diarize-first mode and its four checkpoints |
 | `060e091` | `--asr/--lang/--glossary` through app, watcher and systemd unit |
 | `384db0e` | glossary aliases for the renderings this corpus really produced |
+
+and then, each one provoked by reading what the first version actually produced:
+
+| commit | content |
+|---|---|
+| `7fb53f0` | settings resolution moved to the light module; speaker labels fixed to the diarization, not to decode order |
+| `53f12a3` | Nemotron prompt tags (`<de-DE>`) were leaking into transcripts as words |
+| `451dfbe` | watcher logs the glossary's audit trail; VRAM floor honours `SPEAKER_ASR` |
+| `9cd0be6` | Canary's bundled alignment model no longer forces CUDA (see below) |
+| `6229f1f` | `bench_asr.py` tracked; CPU rows hide the card; Canary language slot value |
+| `c599c1c` | `--lang` conditions the live prompt too; reference windows for CER |
+| `cab82c2` | fuzzy vocabulary repair capped by edit distance for short words |
 
 Implemented as planned: one output contract, two pipeline shapes, one global
 engine setting, per-segment progress instead of per-second, dominance-window leak
@@ -383,6 +395,33 @@ rejection, and a hallucination/repeat guard before text reaches the transcript.
   `test_engines.py` covers this and the rest of the geometry without loading a model.
 - **`difflib` autojunk is a trap for CER**: with the default, text that was 6 %
   wrong scored 71 %. Either pass `autojunk=False` or use `jiwer`.
+
+### Found while benchmarking (same day, after the first full-file sweep)
+
+- **Canary bundles a second ASR, and it decides its own device.** The `.nemo` holds
+  `timestamps_asr_model_{config.yaml,weights.ckpt}` for forced alignment; NeMo
+  restores it with a bare `ASRModel.restore_from(path)` — no `map_location` — so
+  `torch.load` puts the tensors back on the device they were saved from (CUDA). The
+  sub-config's `device: cuda` had to be rewritten **and** the nested restore given a
+  `map_location`: the config governs the constructor, the state dict governs the
+  weights, and fixing only one of the two still OOMed on a full card. Without both,
+  `quality` cannot run on CPU at all, and the failure arrives inside NeMo after the
+  outer model has already reserved VRAM, so the caller's fallback cannot start.
+- **Canary's prompt slots take `de`, not `de-DE`** (`prompt_format: canary2`, slots
+  `decodercontext, source_lang, target_lang, emotion, pnc, itn, diarize, timestamp`).
+  An unknown slot value is dropped without complaint and the checkpoint's default is
+  English — measured: German audio came out looking Swedish.
+- **On a saturated card, a CPU run can still die on the GPU.** `torch.compile` probes
+  the device once; with the card full, `cuDevicePrimaryCtxRetain` returns
+  `CUDA_ERROR_OUT_OF_MEMORY` and the error surfaces inside dynamo, out of reach of
+  any load-time fallback. Benchmark CPU rows therefore set `CUDA_VISIBLE_DEVICES=""`.
+- **Speaker numbering must be decided before the ASR runs.** Cuts are decoded
+  longest-first, so deriving labels from emitted segments let a partial publish
+  renumber a speaker mid-file. `segment_asr` now records the order from the
+  diarization runs (`_label_order`).
+- **`--lang` on `live` is a real risk, not a no-op**: conditioning the prompt on a
+  language the audio does not speak collapsed the English test clip to zero
+  segments. Auto remains the default everywhere, and the README says why.
 
 ### Still open
 
