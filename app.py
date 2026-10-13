@@ -56,6 +56,36 @@ for _p in QUEUE_DIR.glob("*.16k.wav"):  # pending originals stay for requeue
     _p.unlink(missing_ok=True)
 
 _shutdown = threading.Event()
+_browser_seen_lock = threading.Lock()
+_browser_last_seen: float | None = None
+
+
+def _mark_browser_seen() -> None:
+    global _browser_last_seen
+    with _browser_seen_lock:
+        _browser_last_seen = time.monotonic()
+
+
+def _monitor_browser_idle(server: "uvicorn.Server", idle_seconds: float) -> None:
+    """Exit after the browser disappears and all submitted jobs have finished."""
+    while not server.started and not server.should_exit:
+        time.sleep(0.2)
+    poll_s = min(5.0, max(0.5, idle_seconds / 10))
+    while not server.should_exit:
+        time.sleep(poll_s)
+        with _browser_seen_lock:
+            last_seen = _browser_last_seen
+        # Arm only after a real browser page has connected; slow model preload or a
+        # failed automatic browser launch must not kill a freshly started app.
+        if last_seen is None or time.monotonic() - last_seen < idle_seconds:
+            continue
+        with jobs_lock:
+            busy = any(j.get("status") in ("queued", "running") for j in jobs.values())
+        if busy:
+            continue
+        print(f"[app] browser absent and idle for {idle_seconds:.0f}s; shutting down", flush=True)
+        server.should_exit = True
+        return
 
 
 @asynccontextmanager
@@ -71,6 +101,21 @@ async def _lifespan(_app: FastAPI):
         time.sleep(0.5)
     if any(th.is_alive() for th in threads):
         os._exit(0)  # a stuck GPU worker must not hold the app open
+    global transcriber
+    if transcriber is not None:
+        try:
+            transcriber.unload()
+        except Exception:
+            pass
+        transcriber = None
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="Speaker Transcription", lifespan=_lifespan)
@@ -472,6 +517,12 @@ def _raw(payload: bytes, filename: str):
     )
 
 
+@app.post("/api/session/heartbeat")
+async def api_session_heartbeat():
+    _mark_browser_seen()
+    return {"ok": True}
+
+
 @app.get("/api/health")
 async def api_health():
     import torch
@@ -488,6 +539,7 @@ async def api_health():
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
+    _mark_browser_seen()
     html = BASE_DIR / "static" / "index.html"
     return HTMLResponse(html.read_text(encoding="utf-8"))
 
@@ -533,6 +585,8 @@ def main() -> None:
     ap.add_argument("--glossary", default=ASR["glossary"],
                     help="file of canonical spellings to repair in the output")
     ap.add_argument("--preload", action="store_true", help="load models at startup")
+    ap.add_argument("--idle-exit", type=float, default=0.0, metavar="SECONDS",
+                    help="shut down after no browser heartbeat for this long and no jobs remain (0 disables)")
     ap.add_argument("--open-browser", action="store_true",
                     help="open the UI in the default browser once startup (and --preload "
                          "model loading) is finished")
@@ -559,6 +613,12 @@ def main() -> None:
         threading.Thread(
             target=_open_browser_when_ready,
             args=(url, server, args.preload),
+            daemon=True,
+        ).start()
+    if args.idle_exit > 0:
+        threading.Thread(
+            target=_monitor_browser_idle,
+            args=(server, args.idle_exit),
             daemon=True,
         ).start()
     print(f"[app] speaker transcript app on {url}", flush=True)

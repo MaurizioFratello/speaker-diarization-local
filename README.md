@@ -89,8 +89,9 @@ boost, so this is the lever for `Dehnungsmessstreifen` and company; see
 ### Linux
 
 ```bash
-./setup.sh    # one-time: installs uv, Python 3.12 venv, CUDA torch, NeMo
-./run.sh      # starts the app and preloads models
+./setup.sh            # one-time: installs uv, Python 3.12 venv, CUDA torch, NeMo
+./run.sh              # starts the app, preloads models, and opens the browser
+./install-desktop.sh  # optional: add a one-click launcher to the app menu
 ```
 
 ### Windows (PowerShell)
@@ -101,6 +102,10 @@ boost, so this is the lever for `Dehnungsmessstreifen` and company; see
 ```
 
 The launcher opens **http://127.0.0.1:8765** in your default browser once the server and preloaded models are ready. If it cannot open a browser, navigate there manually and drop files.
+On Linux, `./install-desktop.sh` adds a **Speaker Diarization** app-menu launcher. The model
+stays loaded while a browser tab is open or a transcription job is active; after the last
+tab closes and the app is idle for 120 seconds, the server shuts down and releases GPU memory.
+Set `SPEAKER_IDLE_EXIT=0` before `./run.sh` to disable automatic shutdown.
 
 Supported inputs: WAV, MP3, M4A, FLAC, OGG/Opus, AAC, WMA, AMR, AIFF, and
 video containers (MP4, MKV, MOV, WEBM) — the audio track is extracted locally.

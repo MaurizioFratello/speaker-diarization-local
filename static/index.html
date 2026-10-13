@@ -343,6 +343,16 @@ function hideStatus(){ $("status").classList.add("hidden"); }
     el.textContent = `${h.cuda ? "CUDA" : "CPU"} · ${diar} + ${asr} · ${lang}`;
   } catch (_) { el.textContent = "Local speaker diarization + ASR"; }
 })();
+
+// Keep the local server/model alive only while a browser page is present.
+function appHeartbeat(){
+  fetch("/api/session/heartbeat", {method:"POST", cache:"no-store", keepalive:true}).catch(()=>{});
+}
+appHeartbeat();
+setInterval(appHeartbeat, 20000);
+window.addEventListener("pagehide", () => {
+  try { navigator.sendBeacon("/api/session/heartbeat", new Blob()); } catch (_) {}
+});
 </script>
 </body>
 </html>
