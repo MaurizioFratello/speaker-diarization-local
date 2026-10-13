@@ -140,14 +140,22 @@ check(all(x.speaker == 1 for x in w), "kept words carry the cut's speaker")
 
 print("7) words: a model without timestamps gets usable synthesised timings")
 class NoTs:
-    text = "vier Worte hier drin"
+    text = "vier Worte <de-DE> hier drin"
     timestamp = None
 w = _words(NoTs(), late, 0.08, "test")
-check(len(w) == 4, f"all four words kept with synthesised timings ({len(w)})")
+check(len(w) == 4, f"all four words kept, tag removed from the text ({len(w)})")
 check(w == sorted(w, key=lambda x: x.start) and w[0].start >= 100.0 and w[-1].end <= 110.0,
       "synthesised timings are monotonic and inside the dominance window")
 
-print("8) out-of-order batch is an error, not silent garbage")
+print("8) language tags never reach the transcript")
+h = Hyp("aufklären", [{"word": "aufklären.<de-DE>", "start": 0.3, "end": 0.6},
+                      {"word": "<de-DE>", "start": 0.7, "end": 0.8},
+                      {"word": "das", "start": 1.0, "end": 1.2}])
+w = _words(h, late, 0.08, "test")
+check([x.text for x in w] == ["aufklären.", "das"],
+      f"tags stripped from words, bare tags dropped: {[x.text for x in w]}")
+
+print("9) out-of-order batch is an error, not silent garbage")
 h = Hyp("verschoben", ts(("wort", 40.0, 40.4)))   # 40 s into a 10.3 s cut
 try:
     _words(h, late, 0.08, "test")
@@ -155,7 +163,7 @@ try:
 except Exception as exc:
     check("out of order" in str(exc), f"raises with an actionable message: {type(exc).__name__}")
 
-print("9) assembly: one segment per sentence, speakers relabelled by first appearance")
+print("10) assembly: one segment per sentence, speakers relabelled by first appearance")
 p = pipe()
 p._probs = grid([(100, 2000, 0), (2200, 4200, 1)])
 words = {
@@ -171,10 +179,20 @@ check(all(set(s) == {"text", "start", "end", "speaker"} for s in segs),
       "output contract keys unchanged")
 check(all(s["end"] > s["start"] for s in segs), "every segment has positive duration")
 
-print("10) offset: VAD-trimmed input still reports original-file timestamps")
+print("11) offset: VAD-trimmed input still reports original-file timestamps")
 segs2 = p._finalize(words, offset=1234.5)
 check(abs(segs2[0]["start"] - (segs[0]["start"] + 1234.5)) < 1e-6,
       "offset shifts the whole transcript")
+
+print("12) numbering decided before the ASR: partials cannot renumber a speaker")
+p2 = pipe()
+p2._probs = grid([(100, 2000, 0), (2200, 4200, 1)])
+p2._label_order = {1: 0, 0: 1}          # as if the diarization saw spk1 first
+segs3 = p2._finalize(words, offset=0.0)
+check(sorted({s["speaker"] for s in segs3}) == ["speaker_0", "speaker_1"],
+      "labels still come from the mapping, not from word order")
+check(any(s["speaker"] == "speaker_1" and "Erstens" in s["text"] for s in segs3),
+      "speaker 0's words carry the precomputed label 1")
 
 print()
 if FAILED:

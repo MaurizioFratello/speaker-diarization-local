@@ -33,7 +33,8 @@ import model_store
 SAMPLE_RATE = 16_000
 
 # ``<de-DE>``/``<en>`` language tags the prompt-conditioned model appends to its text.
-_LANG_TAG = re.compile(r"\s*<[a-z]{2}(?:-[A-Za-z]{2})?>\s*$")
+_SPACE2 = re.compile(r" {2,}")
+_LANG_TAG = re.compile(r"\s*<[a-z]{2}(?:-[A-Za-z]{2})?>\s*")   # Nemotron prompt markers
 
 
 class EngineError(RuntimeError):
@@ -332,16 +333,19 @@ def _words(hyp, cut: Cut, frame_seconds: float, spec_label: str = "ASR") -> list
     text = getattr(hyp, "text", hyp)
     if not isinstance(text, str):
         text = str(text)
-    text = _LANG_TAG.sub("", text).strip()
+    # Unanchored on purpose: a prompt-tagged hypothesis carries the tag inline, e.g.
+    # "… zwischen Kraft und Stress <de-DE> Was ist denn …", and an end-anchored
+    # pattern left it in the transcript as a word of its own.
+    text = _SPACE2.sub(" ", _LANG_TAG.sub(" ", text)).strip()
     if not text:
         return []
 
     entries = []
     ts = getattr(hyp, "timestamp", None) or {}
     for item in ts.get("word") or []:
-        word = (item.get("word") or "").strip()
+        word = _LANG_TAG.sub("", item.get("word") or "").strip()
         if not word:
-            continue
+            continue  # a bare language tag is not a word
         if "start" in item and "end" in item:
             t0, t1 = float(item["start"]), float(item["end"])
         else:
