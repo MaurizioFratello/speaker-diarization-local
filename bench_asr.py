@@ -78,7 +78,11 @@ from pathlib import Path
 from pipeline import load_transcriber, prepare_audio, trim_edge_silence
 t0 = time.time()
 tr = load_transcriber(sys.argv[1], device=sys.argv[2], lang=sys.argv[4],
-                      glossary=sys.argv[6] or None).load()
+                      glossary=sys.argv[6] or None,
+                      # Activations, not weights, are what gets a co-resident engine
+                      # evicted; batch_size is the knob for that, so it has to be
+                      # settable from the harness to measure it.
+                      batch_size=int(os.environ.get("BENCH_BATCH", "16"))).load()
 load = time.time() - t0
 wav = prepare_audio(sys.argv[3], Path(sys.argv[5]) / (Path(sys.argv[3]).stem + ".16k.wav"))
 audio_s = len(sf.read(wav, dtype="float32")[0]) / 16000
@@ -88,7 +92,8 @@ segs = tr.transcribe(work, offset=off)
 wall = time.time() - t1
 peak = torch.cuda.max_memory_allocated(tr.device) / 2**30 if tr.device.type == "cuda" else 0.0
 free = torch.cuda.mem_get_info()[0] / 2**30 if tr.device.type == "cuda" else 0.0
-json.dump({"segments": segs, "load_s": load, "wall_s": wall, "peak_gib": peak,
+json.dump({"config": sys.argv[1], "device": sys.argv[2],
+           "segments": segs, "load_s": load, "wall_s": wall, "peak_gib": peak,
            "device_used": tr.device.type,
            "free_gib_after": free, "describe": tr.describe(), "audio_s": audio_s},
           open(Path(sys.argv[5]) / "row.json", "w"))
@@ -113,7 +118,8 @@ json.dump({"segments": segs, "load_s": load, "wall_s": wall, "peak_gib": peak,
                 "error": " | ".join(tail)[-600:], "note": NOTE.get((cfg, device), ""),
                 "wall_s": time.time() - t0}
     row = json.loads(row_file.read_text())
-    row.update(config=cfg, device=device, total_s=time.time() - t0)
+    row.update(config=cfg, device=device, total_s=time.time() - t0,
+               batch_size=int(os.environ.get("BENCH_BATCH", "16")))
     return row
 
 
@@ -124,7 +130,9 @@ def _stats(row: dict) -> dict:
     segs = row.get("segments") or []
     words = [len(s["text"].split()) for s in segs]
     return {
-        "config": row["config"], "device": row["device"],
+        # Self-describing rows: a harness run that was interrupted mid-row still left
+        # a usable row.json on disk without these fields, which then blew up here.
+        "config": row.get("config", "?"), "device": row.get("device", "?"),
         "device_used": row.get("device_used", row["device"]),
         "audio_s": round(row.get("audio_s", 0), 1),
         "load_s": round(row.get("load_s", 0), 1),

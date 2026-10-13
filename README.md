@@ -21,13 +21,19 @@ anything missing is fetched once from the Hugging Face Hub and cached.
 Two ways to get from audio to speaker-attributed text. Pick one globally with
 `--asr` (or `SPEAKER_ASR` for the watcher); it is one setting, not a per-file choice.
 
-| `--asr` | ASR checkpoint | Diarization → ASR | Language | VRAM (bf16) |
+| `--asr` | ASR checkpoint | Diarization → ASR | Language | VRAM to be admitted |
 |---|---|---|---|---|
-| `live` | Nemotron 3.5 ASR Streaming 0.6B (2.3 GB) | coupled streaming ([official multitalker rail](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md), vendored in [`pipeline.py`](pipeline.py)) | detected (101 prompts) | ~1.7 GB |
-| `fast` | same weights, decoded offline | diarize first, ASR on the speaker cuts ([`segment_asr.py`](segment_asr.py)) | detected | ~2.0 GB |
-| **`balanced`** *(default)* | Parakeet TDT 0.6B v3 (2.5 GB, 25 languages) | diarize first | detected by the model | ~2.9 GB |
-| `quality` | Canary 1B v2 (6.4 GB) | diarize first | **must be given** (`--lang de`) | ~4.4 GB |
-| `german` | stt_de_fastconformer_hybrid_large_pc (3.8 GB) | diarize first | German only | ~2.1 GB |
+| `live` | Nemotron 3.5 ASR Streaming 0.6B (2.3 GB) | coupled streaming ([official multitalker rail](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md), vendored in [`pipeline.py`](pipeline.py)) | detected (101 prompts) | 2.5 GB |
+| `fast` | same weights, decoded offline | diarize first, ASR on the speaker cuts ([`segment_asr.py`](segment_asr.py)) | detected | 3.1 GB |
+| **`balanced`** *(default)* | Parakeet TDT 0.6B v3 (2.5 GB, 25 languages) | diarize first | detected by the model | 3.1 GB |
+| `quality` | Canary 1B v2 (6.4 GB) | diarize first | **must be given** (`--lang de`) | 5.5 GB |
+| `german` | stt_de_fastconformer_hybrid_large_pc (3.8 GB) | diarize first | German only | 3.2 GB |
+
+VRAM is what an engine asks the card for before it will load — bf16 weights, a
+CUDA context and the activations of a `batch_size=16` decode, measured from a real
+run rather than read off the checkpoint size (`engines.vram_floor_gib()` derives it,
+so a smaller batch lowers the bar). An engine that is refused does not fail: it runs
+on CPU and says so.
 
 The `live` row is the original path: it emits partial text while the file is
 still being read, and because diarization and ASR share one streaming geometry
@@ -146,7 +152,9 @@ Deployment settings are environment variables, read in this order: CLI flag →
 the systemd unit, so there is one place to change the engine on a server.
 
 - `SPEAKER_ASR=live|fast|balanced|quality|german` — the global engine choice.
-- `SPEAKER_LANG=de` — for the engines without language detection (`quality`).
+- `SPEAKER_LANG=de` — required by `quality`, optional for the others. On `live` it
+  conditions the model's prompt, and a language the audio does not speak can make
+  the output collapse to nothing there, so leave it at `auto` for mixed meetings.
 - `SPEAKER_GLOSSARY=/path/glossary.txt`, `SPEAKER_HOTWORDS="…"`.
 - `SPEAKER_MAX_SPKS=1..8` caps speaker streams (lower = less VRAM; `live` mode only).
 - `SPEAKER_ASR_BF16=0|1` pins the ASR weight precision on the `live` path; by
@@ -302,6 +310,105 @@ folder; the real `data/` and GPU are untouched):
 ```bash
 .venv/bin/python test_watcher.py
 ```
+
+## Benchmarks
+
+`bench_asr.py` measures every engine on the same file, each in its own process so
+one engine's crash or VRAM reservation cannot distort another's numbers:
+
+```bash
+.venv/bin/python bench_asr.py /mnt/nas/IFX/03_Music/Recording0024_ManuelDillinger_MEMS.mp3 \
+    --lang de --glossary glossary.example.txt \
+    --groundtruth samples/groundtruth/recording0024.json --wait-gpu 1200 --out bench/full
+.venv/bin/python bench_asr.py MEDIA --rows balanced:cuda,quality:cuda --out bench/one
+```
+
+It reports wall time and real-time factor (RTF: seconds of wall per second of
+audio, `<1` means faster than playback), the allocator's high-water mark, how the
+transcript is chopped up (words per segment, and the share of segments with ≤ 2
+words — the number that describes the one-word-line problem), and a character
+error rate against a hand-corrected reference window. Per-engine transcripts land
+in `bench/<out>/<config>_<device>/transcript.txt` for reading;
+`bench/full/summary.json` holds the rows.
+
+Read CER with care: it compares the reference text with whatever the engine put
+inside that time window, so it also measures *where the engine chose to cut*, not
+only what it heard. It is directly comparable between engines that share the
+diarization (fast/balanced/quality/german); against `live`, which runs its own
+joint diarization, a CER difference partly reflects different segment boundaries.
+The qualitative score below is the tiebreaker.
+
+**Qualitative score (1–7).** Objective metrics only go so far, so each engine's
+transcript of the same passage was read against the reference correction and
+scored: 7 = publishable as it stands, 6 = a few wrong words, 5 = readable with
+visible effort, 4 = meaning intact but several mishearings and fragments,
+3 = patchy, 2 = mostly broken, 1 = unusable. Scores are the maintainer's judgement
+on one 53-minute German technical interview (two speakers, domain vocabulary,
+mixed English terms) — treat them as a strong prior, not a universal ranking.
+
+### Results — one 53-minute interview, four engines
+
+Media: `Recording0024_ManuelDillinger_MEMS.mp3` — 3222 s, two speakers, German with
+English technical vocabulary, the room reverberant and the vocabulary hostile
+(`Dehnungsmessstreifen`, `stresskompensiert`, `E-Modul`). Glossary on for every row,
+`--lang` given only to engines that require it, one fresh process per row, and a
+60-second hand-corrected window (`samples/groundtruth/recording0024.json`) for CER.
+
+| engine | asked | actually ran | wall | RTF | load | peak VRAM | segs | words/seg | ≤2-word | CER | score |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `balanced` | cpu | cpu | 126 s | 0.039 | 6 s | – | 404 | 12.3 | 16 % | **0.054** | **6** |
+| `quality` | cpu | cpu | 427 s | 0.133 | 10 s | – | 572 | 8.2 | 23 % | 0.058 | 6 |
+| `fast` | cpu | cpu | 207 s | 0.064 | 22 s | – | 293 | 16.5 | 9 % | 0.074 | 5 |
+| `live` | cpu | cpu | 886 s | 0.275 | 22 s | – | 400 | 12.7 | 17 % | 0.088 | 4 |
+| `live` | cuda | cuda | **64 s** | **0.020** | 25 s | 1.69 GiB | 393 | 12.9 | 19 % | 0.085 | 4 |
+
+RTF is wall seconds per audio second, so `balanced` on CPU turns a 53-minute
+interview into a transcript in two minutes — 25× faster than playback on cores that
+were nobody else's. The `live`/cuda row is the only one that kept the card; see the
+co-tenancy note below, because that is the interesting part of this table.
+
+**What the scores were judging.** Same 60 seconds of reference text, one reading per
+engine, 7 = publishable as is, 4 = meaning intact but fragments and mishearings.
+`balanced` wrote `Dehnungsmessstreifen` correctly in both places, and `quality` did
+not write it once (`den Weststreifen`, `Demosstreifen`) — yet `quality` invented less
+elsewhere, produced `Ja.` where the others produced `Yeah.`, and kept sentence
+punctuation disciplined. `fast` and `live` misheard the domain vocabulary repeatedly
+(`demerst Streifen`, `Scholdungstechnik`, `Meshstreifen`, `Akowsensorke`) and
+`live` also breaks mid-sentence at chunk boundaries. Both engines that got the word
+wrong are also the two that produced the highest word-per-second counts, so the
+glossary is load-bearing, not decorative.
+
+**The `≤ 2-word` column is the honest one.** Diarize-first did *not* by itself cure the
+one-word lines: it replaced the streaming path's chunk-boundary cuts with the
+speaker-turn and punctuation boundaries of a much better model, and `quality` — which
+reports real word timestamps — fragments the most (8.2 words per line). The fix is
+`SegCfg` (`merge_gap`, `sent_break`), which is the open tuning pass in
+[docs/ASR-BACKENDS-PLAN.md](docs/ASR-BACKENDS-PLAN.md); `fast` shows the direction, at
+16.5 words per line.
+
+**Co-tenancy, measured rather than assumed.** This box normally runs an inference
+server holding 90–92 GiB of the 98 GiB card, and the offline engines were refused,
+evicted, or both:
+
+- `fast` and `balanced` asked for cuda were admitted (2.3–3.7 GiB resident), then died
+  mid-decode on a 198 MiB activation tensor with 155 MiB left, because the neighbour's
+  reservation *grew* after our check. Those rows completed on CPU at 164–317 s, i.e.
+  they paid 40–110 s for the failed attempt.
+- The floor each engine needs is therefore weights + activations, not weights alone:
+  3.1 GiB for `fast`/`balanced`, 3.2 for `german`, 5.5 for `quality`, and 2.5 measured
+  for `live` — which is why `live` is the only engine that coexisted.
+- `BENCH_BATCH=4` was tried to shrink the activations. It did not rescue co-tenancy;
+  the neighbour expanded into whatever was left.
+- `quality` (Canary, 4.4 GiB of bf16 weights) was never measurable on the GPU here, so
+  its row is CPU-only and its GPU number is extrapolated, not verified.
+
+`german` is listed but not benchmarked: it is German-only, overlaps what `balanced`
+already does, and its 3.8 GB checkpoint would have to download first.
+
+Practical consequence: on a machine where a large model holds the card, run these
+engines on CPU (RTF 0.03–0.13) or run the transcript before starting that model. The
+code no longer cares which way it goes — the engine that loses the card mid-file
+finishes the file on CPU and reports the device that answered.
 
 ## Troubleshooting
 
