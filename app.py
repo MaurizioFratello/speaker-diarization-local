@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from pipeline import (
     Transcriber,
+    gate_open,
     load_transcriber,
     map_spliced_time,
     prepare_audio,
@@ -38,7 +39,9 @@ from pipeline import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+# SPEAKER_DATA_DIR relocates uploads/results/queue/app-settings.json (a throwaway
+# run, a second instance on this checkout, or the device-switch tests).
+DATA_DIR = Path(os.environ.get("SPEAKER_DATA_DIR") or BASE_DIR / "data")
 UPLOAD_DIR = DATA_DIR / "uploads"
 RESULTS_DIR = DATA_DIR / "results"
 for d in (UPLOAD_DIR, RESULTS_DIR):
@@ -151,7 +154,15 @@ def _save_device_preference(device: str) -> None:
 DEVICE_PREFERENCE = _read_device_preference()
 transcriber: Transcriber | None = None
 transcriber_error: str | None = None
+#: The device a caller *asked* for, and the device the loaded object *is*. They
+#: differ whenever the VRAM gate declines CUDA or a co-resident process evicts us;
+#: keeping only the request made the **Use CPU** switch look dead, because a run that
+#: had once degraded to CPU answered every later "cuda" request from the cache.
 transcriber_device_preference: str | None = None
+transcriber_actual_device: str | None = None
+#: Why the two differ ("declined at the gate: …", "evicted mid-decode: …"), so a
+#: transcript can say whether CPU was chosen or forced.
+transcriber_note: str | None = None
 transcriber_lock = threading.Lock()
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
@@ -177,10 +188,13 @@ _model_load_active = threading.Event()
 
 def _release_loaded_transcriber() -> None:
     global transcriber, transcriber_device_preference
+    global transcriber_actual_device, transcriber_note
     import torch
     old = transcriber
     transcriber = None
     transcriber_device_preference = None
+    transcriber_actual_device = None
+    transcriber_note = None
     if old is not None:
         try:
             old.unload()
@@ -192,12 +206,37 @@ def _release_loaded_transcriber() -> None:
                 torch.cuda.empty_cache()
 
 
+def _sync_transcriber_state(tr: Transcriber) -> None:
+    """Read the device back off the loaded object instead of trusting the request.
+
+    Runs under ``transcriber_lock``, or from the single worker right after a job, so
+    a mid-decode eviction that moved the models to CPU is reported by the next
+    /api/settings, /api/health and by that job's own provenance line.
+    """
+    global transcriber_actual_device, transcriber_note
+    dev = getattr(tr, "device", None)
+    transcriber_actual_device = str(getattr(dev, "type", dev) or "")
+    note = getattr(tr, "cuda_note", None)
+    if not note and transcriber_device_preference and (
+            transcriber_actual_device != transcriber_device_preference):
+        note = (f"requested {transcriber_device_preference}, loaded on "
+                f"{transcriber_actual_device} (CUDA unavailable or insufficient VRAM;"
+                " retried on every drop)")
+    transcriber_note = note or None
+
+
 def get_transcriber(device: str | None = None) -> Transcriber:
     global transcriber, transcriber_error, transcriber_device_preference
     device = device or DEVICE_PREFERENCE
     with transcriber_lock:
         if transcriber is not None and transcriber_device_preference == device:
-            return transcriber
+            _sync_transcriber_state(transcriber)
+            # "already loaded on cpu" is not "already loaded on cuda": keep the
+            # degraded models only while the card genuinely cannot take us, so the
+            # moment a neighbour's VRAM is freed the next drop gets CUDA back without
+            # restarting the app -- and without paying a reload per drop meanwhile.
+            if transcriber_actual_device == device or not gate_open(device, ASR["mode"])[0]:
+                return transcriber
         _model_load_active.set()
         model_ready_event.clear()
         try:
@@ -210,6 +249,7 @@ def get_transcriber(device: str | None = None) -> Transcriber:
                 glossary=ASR["glossary"] or None,
             ).load()
             transcriber_device_preference = device
+            _sync_transcriber_state(transcriber)
             return transcriber
         except Exception as exc:  # surface load failure to clients
             transcriber_error = f"{type(exc).__name__}: {exc}"
@@ -265,6 +305,10 @@ def _lookup_job(job_id: str) -> dict | None:
         "id": job_id, "name": name, "status": "done", "stage": None, "error": None,
         "elapsed": None, "segments": segs, "labels": labels,
         "vad_full": vad_full,
+        # provenance: which card answered, and the reason when not the asked-for one.
+        # Dropping this lost the device line from every transcript after a restart.
+        "engine": data.get("engine") if isinstance(data, dict) else None,
+        "corrections": data.get("corrections") if isinstance(data, dict) else None,
         "duration": round(max((s.get("end", 0.0) for s in segs), default=0.0), 1),
         "speakers": sorted({s.get("speaker", "speaker_0") for s in segs}),
     }
@@ -302,6 +346,7 @@ def _check_shutdown() -> None:
 
 def run_job(job_id: str, src_path: Path, device: str | None, vad_full: bool = False) -> None:
     job = jobs[job_id]
+    device = device or DEVICE_PREFERENCE
     wav = None
     model_wav = None
     with jobs_lock:
@@ -379,10 +424,18 @@ def run_job(job_id: str, src_path: Path, device: str | None, vad_full: bool = Fa
         job["corrections"] = list(getattr(tr, "last_corrections", []))
         # The same provenance shape the watcher writes, so exports.py renders one line
         # for both paths and a downloaded .md says which card or cores answered.
+        # The device comes from the loaded object, not from what was asked for, and
+        # the reason travels with it: "on cpu" without it is untraceable.
+        with transcriber_lock:
+            _sync_transcriber_state(tr)
+            actual, note = transcriber_actual_device, transcriber_note
         job["engine"] = {**(job.get("engine") or {}),
                          **getattr(tr, "describe", lambda: {})(),
-                         "device": str(getattr(tr, "device", "")),
+                         "device": actual or str(getattr(tr, "device", "")),
+                         "requested_device": device,
                          "repairs": len(job["corrections"])}
+        if note and actual != device:
+            job["engine"]["device_note"] = note
         _save_result(job)
         _sweep_uploads(wav)
         (QUEUE_DIR / f"{job_id}.json").unlink(missing_ok=True)
@@ -568,6 +621,7 @@ async def api_settings():
     return {
         "device_preference": DEVICE_PREFERENCE,
         "actual_device": transcriber.device.type if transcriber is not None else None,
+        "device_note": transcriber_note,
         "model_loaded": transcriber is not None,
     }
 
@@ -595,7 +649,8 @@ async def api_set_device(request: Request):
         tr = await asyncio.to_thread(get_transcriber, device)
     except Exception as exc:
         raise HTTPException(500, f"Could not load models on {device}: {exc}")
-    return {"device_preference": device, "actual_device": tr.device.type, "model_loaded": True}
+    return {"device_preference": device, "actual_device": tr.device.type,
+            "device_note": transcriber_note, "model_loaded": True}
 
 
 @app.get("/api/health")
@@ -608,6 +663,7 @@ async def api_health():
         "cuda": torch.cuda.is_available(),
         "device": transcriber.device.type if transcriber is not None else None,
         "device_preference": DEVICE_PREFERENCE,
+        "device_note": transcriber_note,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "asr": (transcriber.describe() if transcriber is not None
                 else {"engine": ASR["mode"], "language": ASR["lang"], "loaded": False}),

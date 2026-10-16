@@ -741,6 +741,27 @@ def _pick_device(spec: EngineSpec, device: str) -> tuple[str, Any]:
     return "cuda", dtype
 
 
+def gate_open(device: str = "cuda", asr: str | None = None) -> tuple[bool, str]:
+    """Would a load that asks for ``device`` actually get the card right now?
+
+    Answers ``(open, why_not)`` using exactly the arithmetic :func:`_pick_device`
+    applies at load time, so a caller holding a transcriber whose CUDA request was
+    declined can re-check per drop instead of staying on CPU until the next restart.
+    ``device`` other than ``cuda`` is trivially open.
+    """
+    if not str(device).startswith("cuda"):
+        return True, ""
+    _pick_device.note = None
+    try:
+        chosen, _dtype = _pick_device(resolve_spec(asr_mode(asr)), device)
+    except Exception as exc:  # unknown engine key, dead driver -> not our business to guess
+        _pick_device.note = None
+        return False, f"gate check failed ({exc.__class__.__name__}: {exc})"
+    note = getattr(_pick_device, "note", None) or ""
+    _pick_device.note = None
+    return chosen == device, note
+
+
 def load_transcriber(
     asr: str | None = None,
     *,
@@ -794,6 +815,8 @@ if __name__ == "__main__":  # CLI smoke test: python pipeline.py audio.wav
         args.asr, device=args.device, lang=args.lang, max_speakers=args.max_speakers,
         hotwords=args.hotwords, glossary=args.glossary, batch_size=args.batch_size,
     )
+    print(f"device: {t.device}"
+          + (f" — {t.cuda_note}" if getattr(t, "cuda_note", None) else ""), flush=True)
     print(f"pipeline: {t.describe()}", flush=True)
     work = Path(args.audio).stem + ".16k.wav"
     converted = not str(args.audio).endswith(".16k.wav")

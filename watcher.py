@@ -720,11 +720,15 @@ def transcribe_queue(todo: list[dict], args, ledger: Store) -> tuple[int, int]:
                             f"no segments for {dur:.0f}s of non-silent audio")
                     raise NoSpeech("silent recording")
                 dsc = transcriber.describe()
+                note = getattr(transcriber, "cuda_note", None)
                 write_transcript(src, digest, segs, entry, args,
                                  extra_paths=job.get("copies"),
                                  engine={"label": dsc.get("label"),
                                          "pipeline": dsc.get("pipeline"),
                                          "device": str(transcriber.device),
+                                         # "on cpu" is untraceable without the reason:
+                                         # asked for, gate-declined or evicted mid-file
+                                         "device_note": note,
                                          "language": dsc.get("language"),
                                          "repairs": len(fixes)})
                 entry.update(duration=round(dur, 1), elapsed=round(time.time() - t_work, 1))

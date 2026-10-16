@@ -34,7 +34,8 @@ def _provenance(engine) -> str | None:
     if engine.get("pipeline"):
         bits.append(str(engine["pipeline"]))
     if engine.get("device"):
-        bits.append(f"on {engine['device']}")
+        note = engine.get("device_note")
+        bits.append(f"on {engine['device']}" + (f" ({note})" if note else ""))
     n = engine.get("repairs")
     if n:
         bits.append(f"{n} vocabulary repair{'s' if n != 1 else ''}")

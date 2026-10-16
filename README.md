@@ -37,7 +37,9 @@ VRAM is what an engine asks the card for before it will load — bf16 weights, a
 CUDA context and the activations of a `batch_size=16` decode, measured from a real
 run rather than read off the checkpoint size (`engines.vram_floor_gib()` derives it,
 so a smaller batch lowers the bar). An engine that is refused does not fail: it runs
-on CPU and says so.
+on CPU, says why, and asks again on the next file — a refusal is a moment, not a
+state, so a card that frees up is used again without restarting anything. (The `live`
+path never degrades quietly: it loads on the device it was told and fails loudly.)
 
 The `live` row is the original path: it emits partial text while the file is
 still being read, and because diarization and ASR share one streaming geometry
@@ -164,6 +166,14 @@ the systemd unit, so there is one place to change the engine on a server.
 - `SPEAKER_ASR=live|fast|balanced|quality|german` — the global engine choice.
 - `SPEAKER_DEVICE=cuda|cpu` selects the startup device. The browser's **Use CPU** switch
   changes it immediately, unloads/reloads the models, and saves the preference for next launch.
+  It decides the *request*; the VRAM gate still decides who gets in, and the gate is re-asked
+  on every drop, so `Use CPU` off means "CUDA as soon as the card can take it". What actually
+  answered, and why if it differs — `declined at the gate`, `refused at load`, `evicted
+  mid-decode` — is in `/api/settings`, in the header under the title, and in every exported
+  transcript line. `SPEAKER_CUDA_ONLY=1` turns the quiet degradation into a hard error
+  ("GPU or the job fails") for runs where falling back to CPU would be worse.
+- `SPEAKER_DATA_DIR=/path` relocates `uploads/`, `results/`, `queue/` and `app-settings.json`
+  — for a second instance on the same checkout, or for the device-switch tests.
 - `SPEAKER_LANG=de` — required by `quality`, optional for the others. On `live` it
   conditions the model's prompt, and a language the audio does not speak can make
   the output collapse to nothing there, so leave it at `auto` for mixed meetings.
@@ -201,6 +211,7 @@ machines without a free GPU.
 | `model_store.py` | loads `models/*.nemo` when present, otherwise the Hub |
 | `glossary.py` | text-side vocabulary repair (stdlib-only, no ML dependencies) |
 | `test_glossary.py` / `test_engines.py` | dependency-light test suites (`python test_engines.py`) |
+| `test_device_switch.py` | the **Use CPU** switch end to end, GPU stack stubbed (`python test_device_switch.py`) |
 | `bench_asr.py` | engine benchmark: time, VRAM, fragmentation, CER (see [Benchmarks](#benchmarks)) |
 | `exports.py` | Transcript renderers (md/txt/json/srt/vtt), stdlib-only by design |
 | `watcher.py` | One-shot folder scanner: transcribes what is new, then exits |

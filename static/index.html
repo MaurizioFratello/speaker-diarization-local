@@ -67,7 +67,7 @@
   <div id="drop">Drop audio / video files here, or click to choose.<br><b>WAV · MP3 · M4A · FLAC · OGG · OPUS · MP4 · MKV · MOV · WEBM</b></div>
   <div class="toggles">
     <label class="tgl"><input type="checkbox" id="vadFull"><span class="trk"></span><span><b>⚡ Skip silence</b><i>Also drops long gaps <u>inside</u> the recording — 2–3× faster; timeline, player and exports keep the original file &amp; timestamps</i></span></label>
-    <label class="tgl"><input type="checkbox" id="cpuMode"><span class="trk"></span><span><b>Use CPU</b><i>Off uses CUDA. Changing devices reloads the models; the choice is saved for next time.</i></span></label>
+    <label class="tgl"><input type="checkbox" id="cpuMode"><span class="trk"></span><span><b>Use CPU</b><i>Off asks for CUDA on every drop. Changing devices reloads the models and is saved for next time; if the card has no room, the run goes to CPU and says why instead of failing.</i></span></label>
     <div id="deviceStatus" class="device-status" aria-live="polite"></div>
   </div>
   <input id="file" type="file" class="hidden" accept="audio/*,video/*,.wav,.mp3,.m4a,.flac,.ogg,.opus,.mp4,.mkv,.mov,.webm,.aac,.wma,.amr,.aiff" multiple>
@@ -121,8 +121,9 @@ async function refreshDeviceSetting(){
     const r=await fetch("/api/settings"), s=await r.json();
     cpuMode.checked = s.device_preference === "cpu";
     cpuMode.disabled = active > 0 || cpuSwitching;
+    const why = s.device_note ? ` — ${s.device_note}` : " (CUDA unavailable or insufficient VRAM)";
     deviceStatus.textContent = s.actual_device && s.actual_device !== s.device_preference
-      ? `Requested ${s.device_preference.toUpperCase()}, currently running on ${s.actual_device.toUpperCase()} (CUDA unavailable or insufficient VRAM).`
+      ? `Requested ${s.device_preference.toUpperCase()}, running on ${s.actual_device.toUpperCase()}${why}. Retried on every drop.`
       : `Currently using ${s.actual_device ? s.actual_device.toUpperCase() : s.device_preference.toUpperCase()}.`;
   } catch (_) { deviceStatus.textContent = "Could not read device setting."; }
 }
@@ -137,7 +138,7 @@ cpuMode.onchange = async () => {
     cpuMode.checked = data.device_preference === "cpu";
     deviceStatus.textContent = data.actual_device === device
       ? `Using ${device.toUpperCase()}. Preference saved.`
-      : `CUDA requested, but running on ${data.actual_device.toUpperCase()}.`;
+      : `${device.toUpperCase()} requested, but running on ${data.actual_device.toUpperCase()}${data.device_note ? " — " + data.device_note : ""}. Retried on every drop.`;
     updateEngineSubtitle();
   } catch(e) {
     cpuMode.checked = previous;
@@ -214,11 +215,15 @@ function pollJob(id, name){
       }
     } else if (j.status === "error") {
       clearInterval(polls[id]); delete polls[id]; setLock(false);
+      refreshDeviceSetting();
       showStatus(`${name} — Error: ${j.error}`, true);
     } else if (j.status === "done") {
       clearInterval(polls[id]); delete polls[id];
       const wasLast = active <= 1;
       setLock(false);
+      // A run can change the device it lives on (evicted to CPU, or the card freed
+      // up and the next drop moved back), so re-read the state the moment it ends.
+      refreshDeviceSetting(); updateEngineSubtitle();
       if (id === curId || id === lastSubmit) {
         if (wasLast) hideStatus();
         render(id, j);
@@ -377,7 +382,9 @@ async function updateEngineSubtitle(){
     const diar = (a.diarization || "speaker diarization").split("/").pop();
     const lang = a.language_detection === "model" ? "automatic language detection" : `language: ${a.language || "auto"}`;
     const device = h.device === "cuda" ? "CUDA" : h.device === "cpu" ? "CPU" : "local";
-    el.textContent = `${device} · ${diar} + ${asr} · ${lang}`;
+    const degraded = h.device && h.device_preference && h.device !== h.device_preference
+      ? ` (${h.device_preference.toUpperCase()} asked${h.device_note ? ", " + h.device_note : ""})` : "";
+    el.textContent = `${device}${degraded} · ${diar} + ${asr} · ${lang}`;
   } catch (_) { el.textContent = "Local speaker diarization + ASR"; }
 }
 updateEngineSubtitle();
