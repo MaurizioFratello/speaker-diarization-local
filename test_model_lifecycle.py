@@ -7,7 +7,7 @@ import os
 import unittest
 import weakref
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -39,6 +39,23 @@ class ModelLifecycleTests(unittest.TestCase):
             engine.unload()
             self.assertIsNot(engine.load(), first)
             self.assertEqual(len(loads), 2)
+
+    def test_cuda_decoder_graph_setting_survives_decoder_recreation(self):
+        from omegaconf import OmegaConf
+
+        disable = Mock()
+        model = SimpleNamespace(
+            cfg=OmegaConf.create({"decoding": {"greedy": {"use_cuda_graph_decoder": True}}}),
+            decoding=SimpleNamespace(decoding=SimpleNamespace(disable_cuda_graphs=disable)),
+        )
+        model.to = Mock(return_value=model)
+        model.eval = Mock(return_value=model)
+        engine = engines.NemoOfflineEngine(engines.resolve_spec("balanced"), device="cuda")
+        with patch.object(engines.model_store, "load_nemo_model", return_value=model):
+            engine.load()
+        disable.assert_called_once_with()
+        self.assertFalse(model.cfg.decoding.greedy.use_cuda_graph_decoder)
+        self.assertEqual(model.to.call_args.kwargs["device"].type, "cuda")
 
     def _transcriber(self, fail_during):
         refs = []

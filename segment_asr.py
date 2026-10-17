@@ -111,6 +111,10 @@ class DiarizeFirst:
         if self.diar_model is None:
             model = load_nemo_model(self.diar_model_id, SortformerEncLabelModel)
             self.diar_model = model.to(device=torch.device(self.device)).eval()
+            if torch.device(self.device).type == "cuda":
+                from gpu_features import BoundedMelFeatures
+                preprocessor = self.diar_model.preprocessor
+                preprocessor.featurizer = BoundedMelFeatures(preprocessor.featurizer)
             self.frame_len = float(model.cfg.preprocessor.get("window_stride", self.frame_len))
             if self.diar_offline:
                 modules = self.diar_model.sortformer_modules

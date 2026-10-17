@@ -187,7 +187,11 @@ the systemd unit, so there is one place to change the engine on a server.
 - `SPEAKER_ASR_BF16=0|1` pins the ASR weight precision on the `live` path; by
   default the app auto-selects bf16 (eager decoder, ~1.2 GB less VRAM) when the
   GPU has less than ~6 GB free, and fp32 (CUDA-graph decoder) otherwise. The
-  offline engines always use bf16 on CUDA (fp16 where bf16 is missing).
+  offline engines always use bf16 on CUDA (fp16 where bf16 is missing), with
+  eager CUDA RNNT decoding to avoid stale graph buffers across variable-length
+  batches/files. Eager CUDA is still GPU-accelerated, not CPU fallback.
+  Diarization extracts long recordings' mel features in overlapping 60-second
+  CUDA blocks, then normalizes globally and retains one continuous speaker session.
 - `--host 0.0.0.0` to serve your LAN (keep it private; there is no auth).
 
 ## CLI (no browser)
@@ -212,6 +216,9 @@ machines without a free GPU.
 | `glossary.py` | text-side vocabulary repair (stdlib-only, no ML dependencies) |
 | `test_glossary.py` / `test_engines.py` | dependency-light test suites (`python test_engines.py`) |
 | `test_device_switch.py` | the **Use CPU** switch end to end, GPU stack stubbed (`python test_device_switch.py`) |
+| `gpu_features.py` / `test_gpu_features.py` | bounded-memory CUDA mel extraction and equivalence tests against NeMo |
+| `test_model_lifecycle.py` | model reuse, CUDA decoder configuration, and OOM recovery regressions |
+| `test_long_queue.py` | opt-in real CUDA queue test: `python test_long_queue.py first.mp3 second.mp3 --cuda-memory-gib 5` (temporary storage, CPU fallback disabled) |
 | `bench_asr.py` | engine benchmark: time, VRAM, fragmentation, CER (see [Benchmarks](#benchmarks)) |
 | `exports.py` | Transcript renderers (md/txt/json/srt/vtt), stdlib-only by design |
 | `watcher.py` | One-shot folder scanner: transcribes what is new, then exits |

@@ -225,6 +225,17 @@ class NemoOfflineEngine:
         model = model_store.load_nemo_model(self.spec.model_id, cls)
         dtype = self.dtype or (torch.bfloat16 if str(self.device).startswith("cuda") else torch.float32)
         self.model = model.to(device=torch.device(self.device), dtype=dtype).eval()
+        # Offline batches change shape across cuts/files. NeMo's captured RNNT
+        # decoder can retain stale buffers (illegal CUDA access on a later file).
+        # Eager decoding still runs on CUDA; disable graphs in the config too,
+        # since requesting timestamps can reconstruct the decoder on first use.
+        inner = getattr(getattr(self.model, "decoding", None), "decoding", None)
+        if str(self.device).startswith("cuda") and hasattr(inner, "disable_cuda_graphs"):
+            from omegaconf import open_dict
+            decoding_cfg = self.model.cfg.decoding
+            with open_dict(decoding_cfg):
+                decoding_cfg.greedy.use_cuda_graph_decoder = False
+            inner.disable_cuda_graphs()
         return self.model
 
     def unload(self) -> None:
