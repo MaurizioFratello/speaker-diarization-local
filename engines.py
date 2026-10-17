@@ -212,6 +212,9 @@ class NemoOfflineEngine:
         }
 
     def load(self):
+        if self.model is not None:
+            return self.model
+
         import torch
         from nemo.collections.asr.models import ASRModel
 

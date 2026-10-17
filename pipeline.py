@@ -666,8 +666,12 @@ class OfflineTranscriber(GlossaryFix):
             nemo_logging.warning(
                 f"{self._impl.engine.spec.label}: CUDA out of memory, reloading on CPU"
             )
-            self._reload_on_cpu()
-            self._impl.load()
+        else:
+            return self
+        # Leave the handler first: its traceback can retain the failed model and
+        # GPU activations, defeating unload()/empty_cache() during recovery.
+        self._reload_on_cpu()
+        self._impl.load()
         return self
 
     def unload(self) -> None:
@@ -704,10 +708,13 @@ class OfflineTranscriber(GlossaryFix):
             nemo_logging.warning(
                 f"{self._impl.engine.spec.label}: CUDA out of memory while decoding, "
                 f"retrying this file on CPU")
-            self._reload_on_cpu()
-            segs = self._impl.transcribe(
-                os.fspath(wav_path), publish=self._publish(publish), offset=offset
-            )
+        else:
+            return self._fix(segs)
+        # Retry outside the handler so the failed decode's tensors are released.
+        self._reload_on_cpu()
+        segs = self._impl.transcribe(
+            os.fspath(wav_path), publish=self._publish(publish), offset=offset
+        )
         return self._fix(segs)
 
     def _reload_on_cpu(self) -> None:
